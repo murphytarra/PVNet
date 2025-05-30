@@ -1,0 +1,189 @@
+{
+  "files": [
+    "README.md"
+  ],
+  "imageSize": 100,
+  "commit": false,
+  "commitType": "docs",
+  "commitConvention": "angular",
+  "contributors": [
+    {
+      "login": "felix-e-h-p",
+      "name": "Felix",
+      "avatar_url": "https://avatars.githubusercontent.com/u/137530077?v=4",
+      "profile": "https://github.com/felix-e-h-p",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "Sukh-P",
+      "name": "Sukhil Patel",
+      "avatar_url": "https://avatars.githubusercontent.com/u/42407101?v=4",
+      "profile": "https://github.com/Sukh-P",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "dfulu",
+      "name": "James Fulton",
+      "avatar_url": "https://avatars.githubusercontent.com/u/41546094?v=4",
+      "profile": "https://github.com/dfulu",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "AUdaltsova",
+      "name": "Alexandra Udaltsova",
+      "avatar_url": "https://avatars.githubusercontent.com/u/43303448?v=4",
+      "profile": "https://github.com/AUdaltsova",
+      "contributions": [
+        "code",
+        "review"
+      ]
+    },
+    {
+      "login": "zakwatts",
+      "name": "Megawattz",
+      "avatar_url": "https://avatars.githubusercontent.com/u/47150349?v=4",
+      "profile": "https://github.com/zakwatts",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "peterdudfield",
+      "name": "Peter Dudfield",
+      "avatar_url": "https://avatars.githubusercontent.com/u/34686298?v=4",
+      "profile": "https://github.com/peterdudfield",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "mahdilamb",
+      "name": "Mahdi Lamb",
+      "avatar_url": "https://avatars.githubusercontent.com/u/4696915?v=4",
+      "profile": "https://github.com/mahdilamb",
+      "contributions": [
+        "infra"
+      ]
+    },
+    {
+      "login": "jacobbieker",
+      "name": "Jacob Prince-Bieker",
+      "avatar_url": "https://avatars.githubusercontent.com/u/7170359?v=4",
+      "profile": "https://www.jacobbieker.com",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "codderrrrr",
+      "name": "codderrrrr",
+      "avatar_url": "https://avatars.githubusercontent.com/u/149995852?v=4",
+      "profile": "https://github.com/codderrrrr",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "confusedmatrix",
+      "name": "Chris Briggs",
+      "avatar_url": "https://avatars.githubusercontent.com/u/617309?v=4",
+      "profile": "https://chrisxbriggs.com",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "tmi",
+      "name": "tmi",
+      "avatar_url": "https://avatars.githubusercontent.com/u/147159?v=4",
+      "profile": "https://github.com/tmi",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "carderne",
+      "name": "Chris Arderne",
+      "avatar_url": "https://avatars.githubusercontent.com/u/19817302?v=4",
+      "profile": "https://rdrn.me/",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "Dakshbir",
+      "name": "Dakshbir",
+      "avatar_url": "https://avatars.githubusercontent.com/u/144359831?v=4",
+      "profile": "https://github.com/Dakshbir",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "MAYANK12SHARMA",
+      "name": "MAYANK SHARMA",
+      "avatar_url": "https://avatars.githubusercontent.com/u/145884197?v=4",
+      "profile": "https://github.com/MAYANK12SHARMA",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "lambaaryan011",
+      "name": "aryan lamba ",
+      "avatar_url": "https://avatars.githubusercontent.com/u/153702847?v=4",
+      "profile": "https://github.com/lambaaryan011",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "michael-gendy",
+      "name": "michael-gendy",
+      "avatar_url": "https://avatars.githubusercontent.com/u/64384201?v=4",
+      "profile": "https://github.com/michael-gendy",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "adityasuthar",
+      "name": "Aditya Suthar",
+      "avatar_url": "https://avatars.githubusercontent.com/u/95685363?v=4",
+      "profile": "https://adityasuthar.github.io/",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "markus-kreft",
+      "name": "Markus Kreft",
+      "avatar_url": "https://avatars.githubusercontent.com/u/129367085?v=4",
+      "profile": "https://github.com/markus-kreft",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "JackKelly",
+      "name": "Jack Kelly",
+      "avatar_url": "https://avatars.githubusercontent.com/u/460756?v=4",
+      "profile": "http://jack-kelly.com",
+      "contributions": [
+        "ideas"
+      ]
+    }
+  ],
+  "contributorsPerLine": 7,
+  "skipCi": true,
+  "repoType": "github",
+  "repoHost": "https://github.com",
+  "projectName": "PVNet",
+  "projectOwner": "openclimatefix"
+}
