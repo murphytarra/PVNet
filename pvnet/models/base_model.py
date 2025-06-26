@@ -930,7 +930,8 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
                 # reshape into (forecast_len, components, 3)
                 comps = row_pred.reshape(self.forecast_len, self.num_gmm_components, 3)
                 mus = comps[..., 0]
-                sigs = torch.from_numpy(comps[..., 1]).float().softplus().numpy()
+                raw_sig = torch.from_numpy(comps[..., 1]).float()
+                sigs = F.softplus(raw_sig).numpy()
                 logits = comps[..., 2]
                 # compute mixture weights
                 pis = F.softmax(torch.from_numpy(logits), dim=-1).numpy()
