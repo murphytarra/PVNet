@@ -874,11 +874,20 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         self, batch, y_hat, accum_batch_num, timesteps_to_plot, plot_suffix
     ):
         """Log forecast plot to wandb"""
+
+        if self.use_gmm:
+            y_hat_plot = self._gmm_to_prediction(y_hat)
+        else:
+            # quantile-regression or simple mean: forward() already spits out
+            # shape=(batch, forecast_len[, num_quantiles]), which plot_batch_forecasts expects
+            y_hat_plot = y_hat
+
         fig = plot_batch_forecasts(
             batch,
-            y_hat,
+            y_hat_plot,
             quantiles=self.output_quantiles,
             key_to_plot=self._target_key,
+            timesteps_to_plot=timesteps_to_plot,
         )
 
         plot_name = f"val_forecast_samples/batch_idx_{accum_batch_num}_{plot_suffix}"
