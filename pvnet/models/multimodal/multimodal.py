@@ -15,7 +15,6 @@ from pvnet.models.multimodal.encoders.basic_blocks import AbstractNWPSatelliteEn
 from pvnet.models.multimodal.linear_networks.basic_blocks import AbstractLinearNetwork
 from pvnet.models.multimodal.site_encoders.basic_blocks import AbstractSitesEncoder
 from pvnet.optimizers import AbstractOptimizer
-from pvnet.models.utils import gmm_loss, QuantileLoss
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +42,7 @@ class Model(BaseModel):
         self,
         output_network: AbstractLinearNetwork,
         output_quantiles: Optional[list[float]] = None,
+        num_gmm_components: Optional[int] = None,
         nwp_encoders_dict: Optional[dict[AbstractNWPSatelliteEncoder]] = None,
         sat_encoder: Optional[AbstractNWPSatelliteEncoder] = None,
         pv_encoder: Optional[AbstractSitesEncoder] = None,
@@ -87,6 +87,8 @@ class Model(BaseModel):
         Args:
             output_network: A partially instantiated pytorch Module class used to combine the 1D
                 features to produce the forecast.
+            num_gmm_components: The number of components to use in the GMM output. If set to None,
+                the model will not use GMM output and will instead use a single value output.
             output_quantiles: A list of float (0.0, 1.0) quantiles to predict values for. If set to
                 None the output is a single value.
             nwp_encoders_dict: A dictionary of partially instantiated pytorch Module class used to
@@ -153,8 +155,10 @@ class Model(BaseModel):
         self.adapt_batches = adapt_batches
         print(self.location_id_mapping)
         if self.location_id_mapping is None:
-            logger.warning("location_id_mapping` is not provided, "
-                           "defaulting to outdated GSP mapping (0 to 317)")
+            logger.warning(
+                "location_id_mapping` is not provided, "
+                "defaulting to outdated GSP mapping (0 to 317)"
+            )
 
             # Note 318 is the 2024 UK GSP count, so this is a temporary fix
             # for models trained with this default embedding
@@ -172,11 +176,12 @@ class Model(BaseModel):
             forecast_minutes=forecast_minutes,
             optimizer=optimizer,
             output_quantiles=output_quantiles,
+            num_gmm_components=num_gmm_components,
             target_key=target_key,
             interval_minutes=interval_minutes,
             timestep_intervals_to_plot=timestep_intervals_to_plot,
             forecast_minutes_ignore=forecast_minutes_ignore,
-            save_validation_results_csv=save_validation_results_csv
+            save_validation_results_csv=save_validation_results_csv,
         )
 
         # Number of features expected by the output_network
@@ -193,11 +198,14 @@ class Model(BaseModel):
 
             self.sat_encoder = sat_encoder(
                 sequence_length=self.sat_sequence_len,
-                in_channels=sat_encoder.keywords["in_channels"] + add_image_embedding_channel,
+                in_channels=sat_encoder.keywords["in_channels"]
+                + add_image_embedding_channel,
             )
             if add_image_embedding_channel:
                 self.sat_embed = ImageEmbedding(
-                    num_embeddings, self.sat_sequence_len, self.sat_encoder.image_size_pixels
+                    num_embeddings,
+                    self.sat_sequence_len,
+                    self.sat_encoder.image_size_pixels,
                 )
 
             # Update num features
@@ -222,7 +230,8 @@ class Model(BaseModel):
             for nwp_source in nwp_encoders_dict.keys():
                 nwp_sequence_len = (
                     nwp_history_minutes[nwp_source] // nwp_interval_minutes[nwp_source]
-                    + nwp_forecast_minutes[nwp_source] // nwp_interval_minutes[nwp_source]
+                    + nwp_forecast_minutes[nwp_source]
+                    // nwp_interval_minutes[nwp_source]
                     + 1
                 )
 
@@ -273,7 +282,9 @@ class Model(BaseModel):
             fusion_input_features += self.sensor_encoder.out_features
 
         if self.use_id_embedding:
-            self.embed = nn.Embedding(num_embeddings=num_embeddings, embedding_dim=embedding_dim)
+            self.embed = nn.Embedding(
+                num_embeddings=num_embeddings, embedding_dim=embedding_dim
+            )
 
             # Update num features
             fusion_input_features += embedding_dim
@@ -323,7 +334,10 @@ class Model(BaseModel):
             # eg: x['gsp_id] = [1] with location_id_mapping = {1:0}, would give [0]
             print(self.location_id_mapping)
             id = torch.tensor(
-                [self.location_id_mapping[i.item()] for i in x[f"{self._target_key}_id"]],
+                [
+                    self.location_id_mapping[i.item()]
+                    for i in x[f"{self._target_key}_id"]
+                ],
                 device=self.device,
                 dtype=torch.int64,
             )
@@ -333,7 +347,9 @@ class Model(BaseModel):
         if self.include_sat:
             # Shape: batch_size, seq_length, channel, height, width
             sat_data = x["satellite_actual"][:, : self.sat_sequence_len]
-            sat_data = torch.swapaxes(sat_data, 1, 2).float()  # switch time and channels
+            sat_data = torch.swapaxes(
+                sat_data, 1, 2
+            ).float()  # switch time and channels
 
             if self.add_image_embedding_channel:
                 sat_data = self.sat_embed(sat_data, id)
@@ -412,18 +428,19 @@ class Model(BaseModel):
 
         out = self.output_network(modes)
 
-        # ONLY reshape if we are doing quantile regression
         if self.use_quantile_regression:
-            # Shape: batch_size, seq_length * num_quantiles
-            out = out.reshape(out.shape[0], self.forecast_len, len(self.output_quantiles))
+            out = out.view(out.size(0), self.forecast_len, len(self.output_quantiles))
 
-        # For MDN, 'out' will be a tuple (pi, sigma, mu), which we return directly.
-        # For MSE, 'out' will be the raw single value, also returned directly.
+        elif self.use_gmm:
+            # leave as flat vector of length forecast_len * num_components * 3
+            expected = self.forecast_len * self.num_gmm_components * 3
+            assert (
+                out.size(1) == expected
+            ), f"GMM head produced {out.size(1)} features, expected {expected}"
+            # no further reshape needed: BaseModel._parse_gmm_params will view it as
+            # (batch, forecast_len, num_components, 3)
+
+        else:
+            out = out.view(out.size(0), self.forecast_len)
+
         return out
-
-        # out = self.output_network(modes)
-        # if self.use_quantile_regression:
-            # Shape: batch_size, seq_length * num_quantiles
-          #  out = out.reshape(out.shape[0], self.forecast_len, len(self.output_quantiles))
-
-        # return out

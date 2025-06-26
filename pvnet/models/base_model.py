@@ -1,4 +1,5 @@
 """Base model for all PVNet submodels"""
+
 import copy
 import logging
 import os
@@ -21,6 +22,7 @@ from huggingface_hub.constants import PYTORCH_WEIGHTS_NAME
 from huggingface_hub.file_download import hf_hub_download
 from huggingface_hub.hf_api import HfApi
 from ocf_data_sampler.torch_datasets.sample.base import copy_batch_to_device
+from torch.distributions import Normal
 from torchvision.transforms.functional import center_crop
 
 from pvnet.models.utils import (
@@ -104,14 +106,16 @@ def minimize_data_config(input_path, output_path, model):
                     del config["input_data"]["nwp"][nwp_source]
                 else:
                     # Replace the image size
-                    nwp_pixel_size = model.nwp_encoders_dict[nwp_source].image_size_pixels
+                    nwp_pixel_size = model.nwp_encoders_dict[
+                        nwp_source
+                    ].image_size_pixels
                     nwp_config["image_size_pixels_height"] = nwp_pixel_size
                     nwp_config["image_size_pixels_width"] = nwp_pixel_size
 
                     # Replace the interval_end_minutes minutes
                     nwp_config["interval_end_minutes"] = (
-                        nwp_config["interval_start_minutes"] +
-                        (model.nwp_encoders_dict[nwp_source].sequence_length - 1)
+                        nwp_config["interval_start_minutes"]
+                        + (model.nwp_encoders_dict[nwp_source].sequence_length - 1)
                         * nwp_config["time_resolution_minutes"]
                     )
 
@@ -128,8 +132,8 @@ def minimize_data_config(input_path, output_path, model):
 
             # Replace the interval_end_minutes minutes
             sat_config["interval_end_minutes"] = (
-                sat_config["interval_start_minutes"] +
-                (model.sat_encoder.sequence_length - 1)
+                sat_config["interval_start_minutes"]
+                + (model.sat_encoder.sequence_length - 1)
                 * sat_config["time_resolution_minutes"]
             )
 
@@ -465,7 +469,7 @@ class PVNetModelHubMixin(PyTorchModelHubMixin):
             card_data,
             template_path=card_template_path,
             wandb_links=wandb_links,
-            package_versions=package_versions_markdown
+            package_versions=package_versions_markdown,
         )
 
 
@@ -478,7 +482,9 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         forecast_minutes: int,
         optimizer: AbstractOptimizer,
         output_quantiles: Optional[list[float]] = None,
-        num_gmm_components: Optional[int] = None
+        num_gmm_components: Optional[
+            int
+        ] = None,  # Adding the num of GMM components to the model
         target_key: str = "gsp",
         interval_minutes: int = 30,
         timestep_intervals_to_plot: Optional[list[int]] = None,
@@ -493,6 +499,7 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
             optimizer (AbstractOptimizer): Optimizer
             output_quantiles: A list of float (0.0, 1.0) quantiles to predict values for. If set to
                 None the output is a single value.
+            num_gmm_components: Number of GMM components to use for the model.
             target_key: The key of the target variable in the batch
             interval_minutes: The interval in minutes between each timestep in the data
             timestep_intervals_to_plot: Intervals, in timesteps, to plot during training
@@ -506,7 +513,9 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         self._target_key = target_key
         if timestep_intervals_to_plot is not None:
             for interval in timestep_intervals_to_plot:
-                assert type(interval) in [list, tuple] and len(interval) == 2, ValueError(
+                assert (
+                    type(interval) in [list, tuple] and len(interval) == 2
+                ), ValueError(
                     f"timestep_intervals_to_plot must be a list of tuples or lists of length 2, "
                     f"but got {timestep_intervals_to_plot=}"
                 )
@@ -518,14 +527,19 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
 
         self.history_minutes = history_minutes
         self.forecast_minutes = forecast_minutes
+
+        # Adding the num of GMM componenets
         self.num_gmm_components = num_gmm_components
+
         self.output_quantiles = output_quantiles
         self.interval_minutes = interval_minutes
         self.forecast_minutes_ignore = forecast_minutes_ignore
 
         # Number of timestemps for 30 minutely data
         self.history_len = history_minutes // interval_minutes
-        self.forecast_len = (forecast_minutes - forecast_minutes_ignore) // interval_minutes
+        self.forecast_len = (
+            forecast_minutes - forecast_minutes_ignore
+        ) // interval_minutes
         self.forecast_len_ignore = forecast_minutes_ignore // interval_minutes
 
         self._accumulated_metrics = MetricAccumulator()
@@ -536,10 +550,22 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         # Store whether the model should use quantile regression or simply predict the mean
         self.use_quantile_regression = self.output_quantiles is not None
 
+        # Checking that the num_gmm_components is set
+        self.use_gmm = self.num_gmm_components is not None
+
+        # Both quantile regression and GMM cannot be used at the same time
+        if self.use_quantile_regression and self.use_gmm:
+            raise ValueError(
+                "Cannot use quantile regression and GMM at the same time. "
+                "Please set either output_quantiles or num_gmm_components to None."
+            )
+
         # Store the number of ouput features that the model should predict for
         if self.use_quantile_regression:
             self.num_output_features = self.forecast_len * len(self.output_quantiles)
-        elif self.num_gmm_components: 
+
+        # Here we assume that the GMM outputs 3 parameters per component - this is the mean, std and weight
+        elif self.use_gmm:
             self.num_output_features = self.forecast_len * self.num_gmm_components * 3
         else:
             self.num_output_features = self.forecast_len
@@ -597,6 +623,31 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         """Method to move custom batches to a given device"""
         return copy_batch_to_device(batch, device)
 
+    def _parse_gmm_params(self, y_gmm):
+        """
+        Reshape flat output into (μ, σ, π) tensors.
+        y_gmm: (batch, forecast_len * num_components * 3)
+
+        Returns:
+            mus:    (batch, forecast_len, num_components)
+            sigmas: (batch, forecast_len, num_components)
+            pis:    (batch, forecast_len, num_components)
+        """  # noqa: D205
+        bsz = y_gmm.shape[0]
+        # reshape to [batch, forecast_len, num_components, 3]
+        params = y_gmm.view(
+            bsz,
+            self.forecast_len,
+            self.num_gmm_components,
+            3,
+        )
+        mus = params[..., 0]
+        sigmas = F.softplus(params[..., 1]) + 1e-3  # enforce positivity & stability
+        logits = params[..., 2]
+        # softmax over components to get mixture weights
+        pis = F.softmax(logits, dim=-1)
+        return mus, sigmas, pis
+
     def _quantiles_to_prediction(self, y_quantiles):
         """
         Convert network prediction into a point prediction.
@@ -616,6 +667,16 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         idx = self.output_quantiles.index(0.5)
         y_median = y_quantiles[..., idx]
         return y_median
+
+    def _gmm_to_prediction(self, y_gmm):
+        """
+        Compute the mixture’s expectation E[Y] = Σ π_i μ_i
+        Returns shape (batch, forecast_len)
+        """  # noqa: D205
+        mus, sigmas, pis = self._parse_gmm_params(y_gmm)
+        # expectation over components
+        y_pred = (pis * mus).sum(dim=-1)
+        return y_pred
 
     def _calculate_quantile_loss(self, y_quantiles, y):
         """Calculate quantile loss.
@@ -641,6 +702,26 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
 
         return losses.mean()
 
+    def _calculate_gmm_loss(self, y_gmm, y_true):
+        """
+        Negative log-likelihood of y_true under the predicted GMM.
+        y_gmm:   (batch, forecast_len * num_components * 3)
+        y_true:  (batch, forecast_len)
+        """  # noqa: D205
+        mus, sigmas, pis = self._parse_gmm_params(y_gmm)
+        # expand y_true to [batch, forecast_len, num_components]
+        y_exp = y_true.unsqueeze(-1).expand_as(mus)
+        # compute component log-probs
+        comp = Normal(mus, sigmas)
+        log_p = comp.log_prob(y_exp)  # [batch, forecast_len, num_components]
+        # weight them
+        weighted = log_p + torch.log(pis + 1e-12)
+        # log-sum-exp over components
+        log_probs = torch.logsumexp(weighted, dim=-1)  # [batch, forecast_len]
+        # negative log-likelihood
+        nll = -log_probs.mean()  # mean over batch & horizon
+        return nll
+
     def _calculate_common_losses(self, y, y_hat):
         """Calculate losses common to train, and val"""
 
@@ -649,6 +730,9 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         if self.use_quantile_regression:
             losses["quantile_loss"] = self._calculate_quantile_loss(y_hat, y)
             y_hat = self._quantiles_to_prediction(y_hat)
+        elif self.use_gmm:
+            losses["gmm_loss"] = self._calculate_gmm_loss(y_hat, y)
+            y_hat = self._gmm_to_prediction(y_hat)
 
         # calculate mse, mae
         mse_loss = F.mse_loss(y_hat, y)
@@ -673,8 +757,12 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         mse_each_step = torch.mean((y_hat - y) ** 2, dim=0)
         mae_each_step = torch.mean(torch.abs(y_hat - y), dim=0)
 
-        losses.update({f"MSE_{dict_key_root}/step_{i:03}": m for i, m in enumerate(mse_each_step)})
-        losses.update({f"MAE_{dict_key_root}/step_{i:03}": m for i, m in enumerate(mae_each_step)})
+        losses.update(
+            {f"MSE_{dict_key_root}/step_{i:03}": m for i, m in enumerate(mse_each_step)}
+        )
+        losses.update(
+            {f"MAE_{dict_key_root}/step_{i:03}": m for i, m in enumerate(mae_each_step)}
+        )
 
         return losses
 
@@ -689,10 +777,22 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
                 below_quant = y <= y_hat[..., i]
                 # Mask values small values, which are dominated by night
                 mask = y >= 0.01
-                losses[f"fraction_below_{quantile}_quantile"] = (below_quant[mask]).float().mean()
+                losses[f"fraction_below_{quantile}_quantile"] = (
+                    (below_quant[mask]).float().mean()
+                )
 
             # Take median value for remaining metric calculations
             y_hat = self._quantiles_to_prediction(y_hat)
+
+        # Not too sure if this is correct/needed?
+        elif self.use_gmm:
+            # Log mean predicted uncertainty
+            mus, sigmas, pis = self._parse_gmm_params(y_hat)
+            # mean over batch, horizon, components
+            losses["mean_sigma/val"] = sigmas.mean()
+
+            # Collapse to mixture mean for further metrics
+            y_hat = self._gmm_to_prediction(y_hat)
 
         # Log the loss at each time horizon
         losses.update(self._step_mae_and_mse(y, y_hat, dict_key_root="horizon"))
@@ -764,11 +864,15 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
 
         if self.use_quantile_regression:
             opt_target = losses["quantile_loss/train"]
+        elif self.use_gmm:
+            opt_target = losses["gmm_loss/train"]
         else:
             opt_target = losses["MAE/train"]
         return opt_target
 
-    def _log_forecast_plot(self, batch, y_hat, accum_batch_num, timesteps_to_plot, plot_suffix):
+    def _log_forecast_plot(
+        self, batch, y_hat, accum_batch_num, timesteps_to_plot, plot_suffix
+    ):
         """Log forecast plot to wandb"""
         fig = plot_batch_forecasts(
             batch,
@@ -786,49 +890,72 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
             print(e)
         plt.close(fig)
 
-    def _log_validation_results(self, batch, y_hat, accum_batch_num):
-        """Append validation results to self.validation_epoch_results"""
 
-        # get truth values, shape (b, forecast_len)
-        y = batch[self._target_key][:, -self.forecast_len :]
-        y = y.detach().cpu().numpy()
-        batch_size = y.shape[0]
+def _log_validation_results(self, batch, y_hat, accum_batch_num):
+    """Append validation results to self.validation_epoch_results"""
 
-        # get prediction values, shape (b, forecast_len, quantiles?)
-        y_hat = y_hat.detach().cpu().numpy()
+    # ground truth, (b, forecast_len)
+    y_np = batch[self._target_key][:, -self.forecast_len :].detach().cpu().numpy()
+    time_np = (
+        batch[f"{self._target_key}_time_utc"][:, -self.forecast_len :]
+        .detach()
+        .cpu()
+        .numpy()
+    )
+    id_np = batch[f"{self._target_key}_id"].detach().cpu().numpy().squeeze()
+    y_hat_np = y_hat.detach().cpu().numpy()  # shape varies by mode
 
-        # get time_utc, shape (b, forecast_len)
-        time_utc_key = f"{self._target_key}_time_utc"
-        time_utc = batch[time_utc_key][:, -self.forecast_len :].detach().cpu().numpy()
+    batch_size = y_np.shape[0]
 
-        # get target id and change from (b,1) to (b,)
-        id_key = f"{self._target_key}_id"
-        target_id = batch[id_key].detach().cpu().numpy()
-        target_id = target_id.squeeze()
+    for idx in range(batch_size):
+        row_y = y_np[idx]
+        row_time = time_np[idx]
+        row_id = id_np[idx]
+        row_pred = y_hat_np[
+            idx
+        ]  # shape: (forecast_len, Q) or (forecast_len, 3*C) or (forecast_len,)
 
-        for i in range(batch_size):
-            y_i = y[i]
-            y_hat_i = y_hat[i]
-            time_utc_i = time_utc[i]
-            target_id_i = target_id[i]
+        results = {
+            "y": row_y,
+            "time_utc": row_time,
+        }
 
-            results_dict = {
-                "y": y_i,
-                "time_utc": time_utc_i,
-            }
-            if self.use_quantile_regression:
-                results_dict.update(
-                    {f"y_quantile_{q}": y_hat_i[:, i] for i, q in enumerate(self.output_quantiles)}
-                )
-            else:
-                results_dict["y_hat"] = y_hat_i
+        if self.use_quantile_regression:
+            # unpack quantiles
+            for q_idx, q in enumerate(self.output_quantiles):
+                results[f"y_quantile_{q}"] = row_pred[:, q_idx]
+            # point forecast = median
+            results["y_pred"] = row_pred[:, self.output_quantiles.index(0.5)]
 
-            results_df = pd.DataFrame(results_dict)
-            results_df["id"] = target_id_i
-            results_df["batch_idx"] = accum_batch_num
-            results_df["example_idx"] = i
+        elif self.use_gmm:
+            # reshape into (forecast_len, components, 3)
+            comps = row_pred.reshape(self.forecast_len, self.num_gmm_components, 3)
+            mus = comps[..., 0]
+            sigs = torch.from_numpy(comps[..., 1]).float().softplus().numpy()
+            logits = comps[..., 2]
+            # compute mixture weights
+            pis = F.softmax(torch.from_numpy(logits), dim=-1).numpy()
 
-            self.validation_epoch_results.append(results_df)
+            mix_mean = (pis * mus).sum(axis=-1)
+            results["y_pred"] = mix_mean
+
+            for c in range(self.num_gmm_components):
+                results[f"y_gmm_mean_{c}"] = mus[:, c]
+                results[f"y_gmm_std_{c}"] = sigs[:, c]
+                results[f"y_gmm_weight_{c}"] = pis[:, c]
+
+        else:
+            # simple point mode
+            results["y_pred"] = row_pred
+            results["y_hat"] = row_pred
+
+        results["error"] = results["y"] - results["y_pred"]
+        df = pd.DataFrame(results)
+        df["id"] = row_id
+        df["batch_idx"] = accum_batch_num
+        df["example_idx"] = idx
+
+        self.validation_epoch_results.append(df)
 
     def validation_step(self, batch: dict, batch_idx):
         """Run validation step"""
@@ -850,7 +977,10 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
 
         # Store these to make horizon accuracy plot
         self._horizon_maes.append(
-            {i: losses[f"MAE_horizon/step_{i:03}"].cpu().numpy() for i in range(self.forecast_len)}
+            {
+                i: losses[f"MAE_horizon/step_{i:03}"].cpu().numpy()
+                for i in range(self.forecast_len)
+            }
         )
 
         logged_losses = {f"{k}/val": v for k, v in losses.items()}
@@ -862,7 +992,10 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         )
 
         # Make plots only if using wandb logger
-        if isinstance(self.logger, pl.loggers.WandbLogger) and accum_batch_num in [0, 1]:
+        if isinstance(self.logger, pl.loggers.WandbLogger) and accum_batch_num in [
+            0,
+            1,
+        ]:
             # Store these temporarily under self
             if not hasattr(self, "_val_y_hats"):
                 self._val_y_hats = PredAccumulator()
@@ -900,74 +1033,103 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         return logged_losses
 
     def on_validation_epoch_end(self):
-        """Run on epoch end"""
-
+        """Run on epoch end, computing errors for quantile or GMM outputs."""
         try:
-            # join together validation results, and save to wandb
             validation_results_df = pd.concat(self.validation_epoch_results)
+
+            if self.use_quantile_regression:
+                validation_results_df["y_pred"] = validation_results_df[
+                    "y_quantile_0.5"
+                ]
+            elif self.use_gmm:
+                num_comp = self.num_gmm_components
+                pi_cols = [f"y_gmm_weight_{i}" for i in range(num_comp)]
+                mu_cols = [f"y_gmm_mean_{i}" for i in range(num_comp)]
+                # mixture mean ∑ π_i μ_i
+                validation_results_df["y_pred"] = sum(
+                    validation_results_df[pi_cols[i]]
+                    * validation_results_df[mu_cols[i]]
+                    for i in range(num_comp)
+                )
+                sigma_cols = [f"y_gmm_std_{i}" for i in range(num_comp)]
+                validation_results_df["mean_sigma"] = validation_results_df[
+                    sigma_cols
+                ].mean(axis=1)
+            else:
+                validation_results_df["y_pred"] = validation_results_df["y_hat"]
+
             validation_results_df["error"] = (
-                validation_results_df["y"] - validation_results_df["y_quantile_0.5"]
+                validation_results_df["y"] - validation_results_df["y_pred"]
             )
 
             if isinstance(self.logger, pl.loggers.WandbLogger):
-                # log error distribution metrics
-                wandb.log(
-                    {
-                        "2nd_percentile_median_forecast_error": validation_results_df[
-                            "error"
-                        ].quantile(0.02),
-                        "5th_percentile_median_forecast_error": validation_results_df[
-                            "error"
-                        ].quantile(0.05),
-                        "95th_percentile_median_forecast_error": validation_results_df[
-                            "error"
-                        ].quantile(0.95),
-                        "98th_percentile_median_forecast_error": validation_results_df[
-                            "error"
-                        ].quantile(0.98),
-                        "95th_percentile_median_forecast_absolute_error": abs(
-                            validation_results_df["error"]
-                        ).quantile(0.95),
-                        "98th_percentile_median_forecast_absolute_error": abs(
-                            validation_results_df["error"]
-                        ).quantile(0.98),
-                    }
-                )
-            # saving validation result csvs
+                log_dict = {
+                    "2nd_percentile_median_forecast_error": validation_results_df[
+                        "error"
+                    ].quantile(0.02),
+                    "5th_percentile_median_forecast_error": validation_results_df[
+                        "error"
+                    ].quantile(0.05),
+                    "95th_percentile_median_forecast_error": validation_results_df[
+                        "error"
+                    ].quantile(0.95),
+                    "98th_percentile_median_forecast_error": validation_results_df[
+                        "error"
+                    ].quantile(0.98),
+                    "95th_percentile_median_forecast_absolute_error": validation_results_df[
+                        "error"
+                    ]
+                    .abs()
+                    .quantile(0.95),
+                    "98th_percentile_median_forecast_absolute_error": validation_results_df[
+                        "error"
+                    ]
+                    .abs()
+                    .quantile(0.98),
+                }
+                if self.use_gmm:
+                    log_dict["mean_sigma/val"] = validation_results_df[
+                        "mean_sigma"
+                    ].mean()
+                wandb.log(log_dict)
+
             if self.save_validation_results_csv:
                 with tempfile.TemporaryDirectory() as tempdir:
-                    filename = os.path.join(tempdir, f"validation_results_{self.current_epoch}.csv")
+                    filename = os.path.join(
+                        tempdir, f"validation_results_{self.current_epoch}.csv"
+                    )
                     validation_results_df.to_csv(filename, index=False)
-
-                    # make and log wand artifact
-                    validation_artifact = wandb.Artifact(
+                    artifact = wandb.Artifact(
                         f"validation_results_epoch_{self.current_epoch}", type="dataset"
                     )
-                    validation_artifact.add_file(filename)
-                    wandb.log_artifact(validation_artifact)
+                    artifact.add_file(filename)
+                    wandb.log_artifact(artifact)
 
-        except Exception as e:
-            print("Failed to log validation results to wandb")
-            print(e)
-
-        self.validation_epoch_results = []
-        horizon_maes_dict = self._horizon_maes.flush()
-
-        # Create the horizon accuracy curve
-        if isinstance(self.logger, pl.loggers.WandbLogger):
-            per_step_losses = [[i, horizon_maes_dict[i]] for i in range(self.forecast_len)]
-            try:
-                table = wandb.Table(data=per_step_losses, columns=["horizon_step", "MAE"])
+            if isinstance(self.logger, pl.loggers.WandbLogger):
+                horizon_maes_dict = self._horizon_maes.flush()
+                per_step_losses = [
+                    [i, horizon_maes_dict[i]] for i in range(self.forecast_len)
+                ]
+                table = wandb.Table(
+                    data=per_step_losses, columns=["horizon_step", "MAE"]
+                )
                 wandb.log(
                     {
                         "horizon_loss_curve": wandb.plot.line(
                             table, "horizon_step", "MAE", title="Horizon loss curve"
                         )
-                    },
+                    }
                 )
-            except Exception as e:
-                print("Failed to log horizon_loss_curve to wandb")
-                print(e)
+
+        except Exception as e:
+            print("Failed to log validation results to wandb")
+            print(e)
+        finally:
+            # Reset accumulators for next epoch
+            self.validation_epoch_results = []
+            # If not already flushed above (e.g. non-W&B run), flush horizon MAEs here
+            if not isinstance(self.logger, pl.loggers.WandbLogger):
+                _ = self._horizon_maes.flush()
 
     def configure_optimizers(self):
         """Configure the optimizers using learning rate found with LR finder if used"""
