@@ -890,72 +890,71 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
             print(e)
         plt.close(fig)
 
+    def _log_validation_results(self, batch, y_hat, accum_batch_num):
+        """Append validation results to self.validation_epoch_results"""
 
-def _log_validation_results(self, batch, y_hat, accum_batch_num):
-    """Append validation results to self.validation_epoch_results"""
+        # ground truth, (b, forecast_len)
+        y_np = batch[self._target_key][:, -self.forecast_len :].detach().cpu().numpy()
+        time_np = (
+            batch[f"{self._target_key}_time_utc"][:, -self.forecast_len :]
+            .detach()
+            .cpu()
+            .numpy()
+        )
+        id_np = batch[f"{self._target_key}_id"].detach().cpu().numpy().squeeze()
+        y_hat_np = y_hat.detach().cpu().numpy()  # shape varies by mode
 
-    # ground truth, (b, forecast_len)
-    y_np = batch[self._target_key][:, -self.forecast_len :].detach().cpu().numpy()
-    time_np = (
-        batch[f"{self._target_key}_time_utc"][:, -self.forecast_len :]
-        .detach()
-        .cpu()
-        .numpy()
-    )
-    id_np = batch[f"{self._target_key}_id"].detach().cpu().numpy().squeeze()
-    y_hat_np = y_hat.detach().cpu().numpy()  # shape varies by mode
+        batch_size = y_np.shape[0]
 
-    batch_size = y_np.shape[0]
+        for idx in range(batch_size):
+            row_y = y_np[idx]
+            row_time = time_np[idx]
+            row_id = id_np[idx]
+            row_pred = y_hat_np[
+                idx
+            ]  # shape: (forecast_len, Q) or (forecast_len, 3*C) or (forecast_len,)
 
-    for idx in range(batch_size):
-        row_y = y_np[idx]
-        row_time = time_np[idx]
-        row_id = id_np[idx]
-        row_pred = y_hat_np[
-            idx
-        ]  # shape: (forecast_len, Q) or (forecast_len, 3*C) or (forecast_len,)
+            results = {
+                "y": row_y,
+                "time_utc": row_time,
+            }
 
-        results = {
-            "y": row_y,
-            "time_utc": row_time,
-        }
+            if self.use_quantile_regression:
+                # unpack quantiles
+                for q_idx, q in enumerate(self.output_quantiles):
+                    results[f"y_quantile_{q}"] = row_pred[:, q_idx]
+                # point forecast = median
+                results["y_pred"] = row_pred[:, self.output_quantiles.index(0.5)]
 
-        if self.use_quantile_regression:
-            # unpack quantiles
-            for q_idx, q in enumerate(self.output_quantiles):
-                results[f"y_quantile_{q}"] = row_pred[:, q_idx]
-            # point forecast = median
-            results["y_pred"] = row_pred[:, self.output_quantiles.index(0.5)]
+            elif self.use_gmm:
+                # reshape into (forecast_len, components, 3)
+                comps = row_pred.reshape(self.forecast_len, self.num_gmm_components, 3)
+                mus = comps[..., 0]
+                sigs = torch.from_numpy(comps[..., 1]).float().softplus().numpy()
+                logits = comps[..., 2]
+                # compute mixture weights
+                pis = F.softmax(torch.from_numpy(logits), dim=-1).numpy()
 
-        elif self.use_gmm:
-            # reshape into (forecast_len, components, 3)
-            comps = row_pred.reshape(self.forecast_len, self.num_gmm_components, 3)
-            mus = comps[..., 0]
-            sigs = torch.from_numpy(comps[..., 1]).float().softplus().numpy()
-            logits = comps[..., 2]
-            # compute mixture weights
-            pis = F.softmax(torch.from_numpy(logits), dim=-1).numpy()
+                mix_mean = (pis * mus).sum(axis=-1)
+                results["y_pred"] = mix_mean
 
-            mix_mean = (pis * mus).sum(axis=-1)
-            results["y_pred"] = mix_mean
+                for c in range(self.num_gmm_components):
+                    results[f"y_gmm_mean_{c}"] = mus[:, c]
+                    results[f"y_gmm_std_{c}"] = sigs[:, c]
+                    results[f"y_gmm_weight_{c}"] = pis[:, c]
 
-            for c in range(self.num_gmm_components):
-                results[f"y_gmm_mean_{c}"] = mus[:, c]
-                results[f"y_gmm_std_{c}"] = sigs[:, c]
-                results[f"y_gmm_weight_{c}"] = pis[:, c]
+            else:
+                # simple point mode
+                results["y_pred"] = row_pred
+                results["y_hat"] = row_pred
 
-        else:
-            # simple point mode
-            results["y_pred"] = row_pred
-            results["y_hat"] = row_pred
+            results["error"] = results["y"] - results["y_pred"]
+            df = pd.DataFrame(results)
+            df["id"] = row_id
+            df["batch_idx"] = accum_batch_num
+            df["example_idx"] = idx
 
-        results["error"] = results["y"] - results["y_pred"]
-        df = pd.DataFrame(results)
-        df["id"] = row_id
-        df["batch_idx"] = accum_batch_num
-        df["example_idx"] = idx
-
-        self.validation_epoch_results.append(df)
+            self.validation_epoch_results.append(df)
 
     def validation_step(self, batch: dict, batch_idx):
         """Run validation step"""
