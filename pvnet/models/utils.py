@@ -9,6 +9,50 @@ logger = logging.getLogger(__name__)
 
 logger = logging.getLogger(__name__)
 
+import torch
+from torch.distributions import Categorical, Normal
+
+def gmm_loss(pi: torch.Tensor, sigma: torch.Tensor, mu: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """
+    Calculates the negative log-likelihood loss for a Gaussian Mixture Model.
+
+    Args:
+        pi: The mixture coefficients (probabilities) for each Gaussian component.
+            Shape: (batch_size, num_forecast_horizons, num_gaussians)
+        sigma: The standard deviations of each Gaussian component.
+            Shape: (batch_size, num_forecast_horizons, num_gaussians)
+        mu: The means of each Gaussian component.
+            Shape: (batch_size, num_forecast_horizons, num_gaussians)
+        y: The ground truth target values.
+            Shape: (batch_size, num_forecast_horizons)
+
+    Returns:
+        The mean negative log-likelihood loss.
+    """
+    # We need to expand the target y to match the shape of the GMM parameters
+    # y becomes: (batch_size, num_forecast_horizons, 1)
+    y = y.unsqueeze(-1)
+
+    # Create the mixture distribution (the weights for each Gaussian)
+    mixture_distribution = Categorical(probs=pi)
+
+    # Create the component distributions (the Gaussians themselves)
+    component_distribution = Normal(loc=mu, scale=sigma)
+
+    # Create the full GMM
+    # This object represents the entire probability distribution for each forecast horizon
+    gmm = torch.distributions.mixture_same_family.MixtureSameFamily(
+        mixture_distribution, component_distribution
+    )
+
+    # Calculate the log probability of the true 'y' values under the GMM
+    # This tells us how likely our target values were, given the predicted distribution
+    log_prob = gmm.log_prob(y)
+
+    # We want to maximize the log-likelihood, which is equivalent to
+    # minimizing the negative log-likelihood. We take the mean over the batch.
+    return -log_prob.mean()
+
 
 class PredAccumulator:
     """A class for accumulating y-predictions using grad accumulation and small batch size.

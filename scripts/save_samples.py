@@ -133,7 +133,7 @@ def main(config: DictConfig) -> None:
     print_config(config, resolve=False)
 
     # Set up directory
-    os.makedirs(config_dm.sample_output_dir, exist_ok=False)
+    os.makedirs(config_dm.sample_output_dir, exist_ok=True)
 
     # Copy across configs which define the samples into the new sample directory
     with open(f"{config_dm.sample_output_dir}/datamodule.yaml", "w") as f:

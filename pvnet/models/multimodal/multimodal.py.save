@@ -416,14 +416,10 @@ class Model(BaseModel):
         if self.use_quantile_regression:
             # Shape: batch_size, seq_length * num_quantiles
             out = out.reshape(out.shape[0], self.forecast_len, len(self.output_quantiles))
-
-        # For MDN, 'out' will be a tuple (pi, sigma, mu), which we return directly.
-        # For MSE, 'out' will be the raw single value, also returned directly.
-        return out
-
-        # out = self.output_network(modes)
-        # if self.use_quantile_regression:
-            # Shape: batch_size, seq_length * num_quantiles
-          #  out = out.reshape(out.shape[0], self.forecast_len, len(self.output_quantiles))
-
-        # return out
+            return out
+        elif self.num_gmm_components:
+            out = out.reshape(out.shape[0], self.forecast_len, self.num_gmm_components, 3)
+            mus = out[..., 0]
+            sigmas = torch.exp(out[..., 1])
+            pis = F.softmax(out[..., 2], dim = -1)
+            return mus, sigmas, pis

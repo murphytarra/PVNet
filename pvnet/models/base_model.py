@@ -478,6 +478,7 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         forecast_minutes: int,
         optimizer: AbstractOptimizer,
         output_quantiles: Optional[list[float]] = None,
+        num_gmm_components: Optional[int] = None
         target_key: str = "gsp",
         interval_minutes: int = 30,
         timestep_intervals_to_plot: Optional[list[int]] = None,
@@ -517,6 +518,7 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
 
         self.history_minutes = history_minutes
         self.forecast_minutes = forecast_minutes
+        self.num_gmm_components = num_gmm_components
         self.output_quantiles = output_quantiles
         self.interval_minutes = interval_minutes
         self.forecast_minutes_ignore = forecast_minutes_ignore
@@ -537,6 +539,8 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         # Store the number of ouput features that the model should predict for
         if self.use_quantile_regression:
             self.num_output_features = self.forecast_len * len(self.output_quantiles)
+        elif self.num_gmm_components: 
+            self.num_output_features = self.forecast_len * self.num_gmm_components * 3
         else:
             self.num_output_features = self.forecast_len
 
