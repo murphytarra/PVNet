@@ -832,15 +832,20 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
                 on_epoch=True,
             )
 
-            # Number of accumulated grad batches
+            # Number of accumulated grad batches so far
             grad_batch_num = (batch_idx + 1) / self.trainer.accumulate_grad_batches
 
-            # We only create the figure every 8 log steps
-            # This was reduced as it was creating figures too often
+            # Plot only every N steps to avoid spamming
             if grad_batch_num % (8 * self.trainer.log_every_n_steps) == 0:
+                # convert raw GMM params into point forecasts for plotting
+                if self.use_gmm:
+                    y_hat_plot = self._gmm_to_prediction(y_hat)
+                else:
+                    y_hat_plot = y_hat
+
                 fig = plot_batch_forecasts(
                     batch,
-                    y_hat,
+                    y_hat_plot,
                     batch_idx,
                     quantiles=self.output_quantiles,
                     key_to_plot=self._target_key,
