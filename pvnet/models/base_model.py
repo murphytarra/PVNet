@@ -675,7 +675,8 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         """  # noqa: D205
         mus, sigmas, pis = self._parse_gmm_params(y_gmm)
         # expectation over components
-        y_pred = (pis * mus).sum(dim=-1)
+        y_pred = (pis * mus).sum(dim=-1) # Here we sum over the components
+        # y_pred shape: (batch, forecast_len)
         return y_pred
 
     def _calculate_quantile_loss(self, y_quantiles, y):
@@ -786,11 +787,8 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
 
         # Not too sure if this is correct/needed?
         elif self.use_gmm:
-            # Log mean predicted uncertainty
-            mus, sigmas, pis = self._parse_gmm_params(y_hat)
-            # mean over batch, horizon, components
-            losses["mean_sigma/val"] = sigmas.mean()
-
+            # Calculate the GMM loss
+            losses["gmm_loss/val"] = self._calculate_gmm_loss(y_hat, y)
             # Collapse to mixture mean for further metrics
             y_hat = self._gmm_to_prediction(y_hat)
 
@@ -882,6 +880,9 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
 
         if self.use_gmm:
             y_hat_plot = self._gmm_to_prediction(y_hat)
+            # If we are using GMM, we need to convert the GMM parameters into a point forecast. The shape
+            # of y_hat_plot will be (batch, forecast_len), which is what plot_batch_forecasts expects.
+        elif self.use_quantile_regression:
         else:
             # quantile-regression or simple mean: forward() already spits out
             # shape=(batch, forecast_len[, num_quantiles]), which plot_batch_forecasts expects
@@ -891,6 +892,7 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
             batch,
             y_hat_plot,
             quantiles=self.output_quantiles,
+            gmm_components=self.num_gmm_components,
             key_to_plot=self._target_key,
             timesteps_to_plot=timesteps_to_plot,
         )
@@ -1055,6 +1057,35 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
                 validation_results_df["y_pred"] = validation_results_df[
                     "y_quantile_0.5"
                 ]
+
+                if isinstance(self.logger, pl.loggers.WandbLogger):
+                    log_dict = {
+                        "2nd_percentile_median_forecast_error": validation_results_df[
+                            "error"
+                        ].quantile(0.02),
+                        "5th_percentile_median_forecast_error": validation_results_df[
+                            "error"
+                        ].quantile(0.05),
+                        "95th_percentile_median_forecast_error": validation_results_df[
+                            "error"
+                        ].quantile(0.95),
+                        "98th_percentile_median_forecast_error": validation_results_df[
+                            "error"
+                        ].quantile(0.98),
+                        "95th_percentile_median_forecast_absolute_error": validation_results_df[
+                            "error"
+                        ]
+                        .abs()
+                        .quantile(0.95),
+                        "98th_percentile_median_forecast_absolute_error": validation_results_df[
+                            "error"
+                        ]
+                        .abs()
+                        .quantile(0.98),
+                    }
+
+                    wandb.log(log_dict)
+
             elif self.use_gmm:
                 num_comp = self.num_gmm_components
                 pi_cols = [f"y_gmm_weight_{i}" for i in range(num_comp)]
@@ -1065,47 +1096,13 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
                     * validation_results_df[mu_cols[i]]
                     for i in range(num_comp)
                 )
-                sigma_cols = [f"y_gmm_std_{i}" for i in range(num_comp)]
-                validation_results_df["mean_sigma"] = validation_results_df[
-                    sigma_cols
-                ].mean(axis=1)
+                
             else:
                 validation_results_df["y_pred"] = validation_results_df["y_hat"]
 
             validation_results_df["error"] = (
                 validation_results_df["y"] - validation_results_df["y_pred"]
             )
-
-            if isinstance(self.logger, pl.loggers.WandbLogger):
-                log_dict = {
-                    "2nd_percentile_median_forecast_error": validation_results_df[
-                        "error"
-                    ].quantile(0.02),
-                    "5th_percentile_median_forecast_error": validation_results_df[
-                        "error"
-                    ].quantile(0.05),
-                    "95th_percentile_median_forecast_error": validation_results_df[
-                        "error"
-                    ].quantile(0.95),
-                    "98th_percentile_median_forecast_error": validation_results_df[
-                        "error"
-                    ].quantile(0.98),
-                    "95th_percentile_median_forecast_absolute_error": validation_results_df[
-                        "error"
-                    ]
-                    .abs()
-                    .quantile(0.95),
-                    "98th_percentile_median_forecast_absolute_error": validation_results_df[
-                        "error"
-                    ]
-                    .abs()
-                    .quantile(0.98),
-                }
-                if self.use_gmm:
-                    log_dict["mean_sigma/val"] = validation_results_df[
-                        "mean_sigma"
-                    ].mean()
-                wandb.log(log_dict)
 
             if self.save_validation_results_csv:
                 with tempfile.TemporaryDirectory() as tempdir:
@@ -1151,3 +1148,131 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
             # Use learning rate found by learning rate finder callback
             self._optimizer.lr = self.lr
         return self._optimizer(self)
+
+    def plot_batch_forecasts(
+        self, 
+        batch,
+        y_hat,
+        batch_idx=None,
+        key_to_plot: str = "gsp",
+        timesteps_to_plot: Optional[list[int]] = None,
+    ):
+        """
+        Plot a batch of data and the forecast from that batch.
+        Can handle point forecasts, quantile forecasts, or GMM forecasts by
+        inspecting the model's own configuration (self.use_gmm or self.use_quantile_regression).
+        """
+
+        y_key = key_to_plot
+        y_id_key = f"{key_to_plot}_id"
+        time_utc_key = f"{key_to_plot}_time_utc"
+        
+        # Detach tensors and move to CPU for plotting
+        y_true = batch[y_key].cpu()
+        y_hat = y_hat.cpu()
+        gsp_ids = batch[y_id_key].cpu().numpy().squeeze()
+        
+        times_utc_np = batch[time_utc_key].cpu().numpy().squeeze().astype("datetime64[ns]")
+        times_utc = [pd.to_datetime(t) for t in times_utc_np]
+
+        if timesteps_to_plot is not None:
+            start, end = timesteps_to_plot
+            y_true = y_true[:, start:end]
+            y_hat = y_hat[:, start:end]
+            times_utc = [t[start:end] for t in times_utc]
+
+        batch_size, forecast_len = y_true.shape[-2], y_true.shape[-1]
+        
+        fig, axes = plt.subplots(4, 4, figsize=(20, 18))
+
+        for i, ax in enumerate(axes.ravel()):
+            if i >= batch_size:
+                ax.axis("off")
+                continue
+                
+            # Plot ground truth
+            ax.plot(times_utc[i], y_true[i], marker=".", color="black", label=r"True Value ($y$)")
+
+            # 1. GMM Plotting
+            if self.use_gmm:
+                # Call the existing method from the BaseModel
+                mus, sigmas, pis = self._parse_gmm_params(y_hat[i:i+1])
+                mus, sigmas, pis = mus.squeeze(0), sigmas.squeeze(0), pis.squeeze(0)
+
+                # Calculate mixture mean and standard deviation for visualization
+                mixture_mean = torch.sum(pis * mus, dim=-1)
+                mixture_variance = torch.sum(pis * (mus.pow(2) + sigmas.pow(2)), dim=-1) - mixture_mean.pow(2)
+                mixture_std = torch.sqrt(mixture_variance + 1e-6)
+                
+                # Plot mixture mean
+                ax.plot(times_utc[i], mixture_mean.numpy(), marker=".", color="red", label=r"Mixture Mean ($\hat{\mu}$)")
+                
+                # Plot uncertainty (e.g., 90% confidence interval)
+                lower_bound = mixture_mean - 1.645 * mixture_std
+                upper_bound = mixture_mean + 1.645 * mixture_std
+                ax.fill_between(
+                    times_utc[i], 
+                    lower_bound.numpy(), 
+                    upper_bound.numpy(), 
+                    color="red", 
+                    alpha=0.2, 
+                    label="90% Confidence"
+                )
+
+            # 2. Quantile Plotting
+            elif self.use_quantile_regression:
+                quantiles = self.output_quantiles
+                # Plot the median (0.5 quantile) as the main forecast line
+                median_idx = quantiles.index(0.5)
+                ax.plot(
+                    times_utc[i],
+                    y_hat[i, :, median_idx],
+                    marker=".",
+                    color="blue",
+                    label=r"Median Forecast ($\hat{y}_{0.5}$)",
+                )
+                # Plot other quantiles as shaded areas for uncertainty
+                num_quantiles = len(quantiles)
+                for j in range(num_quantiles // 2):
+                    lower_quantile = quantiles[j]
+                    upper_quantile = quantiles[num_quantiles - 1 - j]
+                    ax.fill_between(
+                        times_utc[i],
+                        y_hat[i, :, j],
+                        y_hat[i, :, num_quantiles - 1 - j],
+                        alpha=0.2,
+                        color="blue",
+                        label=f"{lower_quantile:.2f} - {upper_quantile:.2f}",
+                    )
+
+            # 3. Simple Point Forecast Plotting
+            else:
+                ax.plot(
+                    times_utc[i],
+                    y_hat[i],
+                    marker=".",
+                    color="green",
+                    label=r"Point Forecast ($\hat{y}$)",
+                )
+
+            ax.set_title(f"ID: {gsp_ids[i]} | {times_utc[i][0].date()}", fontsize="medium")
+            xticks = [t for t in times_utc[i] if t.minute == 0][::2]
+            ax.set_xticks(ticks=xticks, labels=[f"{t.hour:02}" for t in xticks], rotation=90)
+            ax.grid(True, which="both", linestyle='--', linewidth=0.5)
+            ax.set_ylim(bottom=0)
+
+        handles, labels = axes[0, 0].get_legend_handles_labels()
+        fig.legend(handles, labels, loc='upper center', bbox_to_anchor=(0.5, 0.995), ncol=4)
+
+        fig.text(0.5, 0.04, 'Time (Hour of Day)', ha='center', va='center')
+        fig.text(0.06, 0.5, f'Normalized {key_to_plot.upper()} Power', ha='center', va='center', rotation='vertical')
+
+        if batch_idx is not None:
+            title = f"Forecasts vs. Truth (Batch Index: {batch_idx})"
+        else:
+            title = "Forecasts vs. Truth"
+        fig.suptitle(title, fontsize=20, y=1.03)
+        
+        plt.tight_layout(rect=[0.08, 0.05, 0.95, 0.95])
+        
+        return fig
