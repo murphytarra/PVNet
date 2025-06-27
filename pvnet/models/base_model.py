@@ -874,42 +874,31 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
     def _log_forecast_plot(
         self, batch, y_hat, accum_batch_num, timesteps_to_plot, plot_suffix
     ):
-        """Log forecast plot to wandb"""
+        """
+        Log forecast plot to wandb by calling the main plotting method.
+        This method now passes the raw y_hat tensor directly.
+        """
 
-        if self.use_gmm:
-            y_hat_plot = self._gmm_to_prediction(y_hat)
-            # If we are using GMM, we need to convert the GMM parameters into a point forecast. The shape
-            # of y_hat_plot will be (batch, forecast_len), which is what plot_batch_forecasts expects.
-        elif self.use_quantile_regression:
-            y_hat_plot = self._quantiles_to_prediction(y_hat)
-            # If we are using quantile regression, we need to convert the quantiles into a point forecast.
-            # The shape of y_hat_plot will be (batch, forecast_len), which is what plot_batch_forecasts expects.
-        else:
-            # quantile-regression or simple mean: forward() already spits out
-            # shape=(batch, forecast_len[, num_quantiles]), which plot_batch_forecasts expects
-            y_hat_plot = y_hat
-
-        # fig = plot_batch_forecasts(
-        #     batch,
-        #     y_hat_plot,
-        #     quantiles=self.output_quantiles,
-        #     gmm_components=self.num_gmm_components,
-        #     key_to_plot=self._target_key,
-        #     timesteps_to_plot=timesteps_to_plot,
-        # )
         fig = self.plot_batch_forecasts(
             batch,
-            y_hat_plot,
+            y_hat,
+            batch_idx=accum_batch_num,
+            key_to_plot=self._target_key,
+            timesteps_to_plot=timesteps_to_plot,
         )
 
         plot_name = f"val_forecast_samples/batch_idx_{accum_batch_num}_{plot_suffix}"
 
         try:
-            self.logger.experiment.log({plot_name: wandb.Image(fig)})
+            if self.logger is not None and hasattr(self.logger.experiment, "log"):
+                import wandb
+
+                self.logger.experiment.log({plot_name: wandb.Image(fig)})
         except Exception as e:
-            print(f"Failed to log {plot_name} to wandb")
+            print(f"Failed to log {plot_name} to logger")
             print(e)
-        plt.close(fig)
+        finally:
+            plt.close(fig)
 
     def _log_validation_results(self, batch, y_hat, accum_batch_num):
         """Append validation results to self.validation_epoch_results"""
