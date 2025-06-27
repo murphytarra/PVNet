@@ -31,7 +31,6 @@ from pvnet.models.utils import (
     PredAccumulator,
 )
 from pvnet.optimizers import AbstractOptimizer
-from pvnet.utils import plot_batch_forecasts
 
 DATA_CONFIG_NAME = "data_config.yaml"
 MODEL_CONFIG_NAME = "model_config.yaml"
@@ -675,7 +674,7 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         """  # noqa: D205
         mus, sigmas, pis = self._parse_gmm_params(y_gmm)
         # expectation over components
-        y_pred = (pis * mus).sum(dim=-1) # Here we sum over the components
+        y_pred = (pis * mus).sum(dim=-1)  # Here we sum over the components
         # y_pred shape: (batch, forecast_len)
         return y_pred
 
@@ -841,11 +840,10 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
                 else:
                     y_hat_plot = y_hat
 
-                fig = plot_batch_forecasts(
+                fig = self.plot_batch_forecasts(
                     batch,
                     y_hat_plot,
                     batch_idx,
-                    quantiles=self.output_quantiles,
                     key_to_plot=self._target_key,
                 )
                 fig.savefig("latest_logged_train_batch.png")
@@ -880,21 +878,28 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
 
         if self.use_gmm:
             y_hat_plot = self._gmm_to_prediction(y_hat)
-            # If we are using GMM, we need to convert the GMM parameters into a point forecast. The shape
+            # If we are using GMM, we need to convert the GMM parameters into a point forecast. The shape
             # of y_hat_plot will be (batch, forecast_len), which is what plot_batch_forecasts expects.
         elif self.use_quantile_regression:
+            y_hat_plot = self._quantiles_to_prediction(y_hat)
+            # If we are using quantile regression, we need to convert the quantiles into a point forecast.
+            # The shape of y_hat_plot will be (batch, forecast_len), which is what plot_batch_forecasts expects.
         else:
             # quantile-regression or simple mean: forward() already spits out
             # shape=(batch, forecast_len[, num_quantiles]), which plot_batch_forecasts expects
             y_hat_plot = y_hat
 
-        fig = plot_batch_forecasts(
+        # fig = plot_batch_forecasts(
+        #     batch,
+        #     y_hat_plot,
+        #     quantiles=self.output_quantiles,
+        #     gmm_components=self.num_gmm_components,
+        #     key_to_plot=self._target_key,
+        #     timesteps_to_plot=timesteps_to_plot,
+        # )
+        fig = self.plot_batch_forecasts(
             batch,
             y_hat_plot,
-            quantiles=self.output_quantiles,
-            gmm_components=self.num_gmm_components,
-            key_to_plot=self._target_key,
-            timesteps_to_plot=timesteps_to_plot,
         )
 
         plot_name = f"val_forecast_samples/batch_idx_{accum_batch_num}_{plot_suffix}"
@@ -1096,7 +1101,7 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
                     * validation_results_df[mu_cols[i]]
                     for i in range(num_comp)
                 )
-                
+
             else:
                 validation_results_df["y_pred"] = validation_results_df["y_hat"]
 
@@ -1150,7 +1155,7 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         return self._optimizer(self)
 
     def plot_batch_forecasts(
-        self, 
+        self,
         batch,
         y_hat,
         batch_idx=None,
@@ -1166,13 +1171,15 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         y_key = key_to_plot
         y_id_key = f"{key_to_plot}_id"
         time_utc_key = f"{key_to_plot}_time_utc"
-        
+
         # Detach tensors and move to CPU for plotting
         y_true = batch[y_key].cpu()
         y_hat = y_hat.cpu()
         gsp_ids = batch[y_id_key].cpu().numpy().squeeze()
-        
-        times_utc_np = batch[time_utc_key].cpu().numpy().squeeze().astype("datetime64[ns]")
+
+        times_utc_np = (
+            batch[time_utc_key].cpu().numpy().squeeze().astype("datetime64[ns]")
+        )
         times_utc = [pd.to_datetime(t) for t in times_utc_np]
 
         if timesteps_to_plot is not None:
@@ -1182,41 +1189,55 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
             times_utc = [t[start:end] for t in times_utc]
 
         batch_size, forecast_len = y_true.shape[-2], y_true.shape[-1]
-        
+
         fig, axes = plt.subplots(4, 4, figsize=(20, 18))
 
         for i, ax in enumerate(axes.ravel()):
             if i >= batch_size:
                 ax.axis("off")
                 continue
-                
+
             # Plot ground truth
-            ax.plot(times_utc[i], y_true[i], marker=".", color="black", label=r"True Value ($y$)")
+            ax.plot(
+                times_utc[i],
+                y_true[i],
+                marker=".",
+                color="black",
+                label=r"True Value ($y$)",
+            )
 
             # 1. GMM Plotting
             if self.use_gmm:
                 # Call the existing method from the BaseModel
-                mus, sigmas, pis = self._parse_gmm_params(y_hat[i:i+1])
+                mus, sigmas, pis = self._parse_gmm_params(y_hat[i : i + 1])
                 mus, sigmas, pis = mus.squeeze(0), sigmas.squeeze(0), pis.squeeze(0)
 
                 # Calculate mixture mean and standard deviation for visualization
                 mixture_mean = torch.sum(pis * mus, dim=-1)
-                mixture_variance = torch.sum(pis * (mus.pow(2) + sigmas.pow(2)), dim=-1) - mixture_mean.pow(2)
+                mixture_variance = torch.sum(
+                    pis * (mus.pow(2) + sigmas.pow(2)), dim=-1
+                ) - mixture_mean.pow(2)
                 mixture_std = torch.sqrt(mixture_variance + 1e-6)
-                
+
                 # Plot mixture mean
-                ax.plot(times_utc[i], mixture_mean.numpy(), marker=".", color="red", label=r"Mixture Mean ($\hat{\mu}$)")
-                
+                ax.plot(
+                    times_utc[i],
+                    mixture_mean.numpy(),
+                    marker=".",
+                    color="red",
+                    label=r"Mixture Mean ($\hat{\mu}$)",
+                )
+
                 # Plot uncertainty (e.g., 90% confidence interval)
                 lower_bound = mixture_mean - 1.645 * mixture_std
                 upper_bound = mixture_mean + 1.645 * mixture_std
                 ax.fill_between(
-                    times_utc[i], 
-                    lower_bound.numpy(), 
-                    upper_bound.numpy(), 
-                    color="red", 
-                    alpha=0.2, 
-                    label="90% Confidence"
+                    times_utc[i],
+                    lower_bound.numpy(),
+                    upper_bound.numpy(),
+                    color="red",
+                    alpha=0.2,
+                    label="90% Confidence",
                 )
 
             # 2. Quantile Plotting
@@ -1255,24 +1276,37 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
                     label=r"Point Forecast ($\hat{y}$)",
                 )
 
-            ax.set_title(f"ID: {gsp_ids[i]} | {times_utc[i][0].date()}", fontsize="medium")
+            ax.set_title(
+                f"ID: {gsp_ids[i]} | {times_utc[i][0].date()}", fontsize="medium"
+            )
             xticks = [t for t in times_utc[i] if t.minute == 0][::2]
-            ax.set_xticks(ticks=xticks, labels=[f"{t.hour:02}" for t in xticks], rotation=90)
-            ax.grid(True, which="both", linestyle='--', linewidth=0.5)
+            ax.set_xticks(
+                ticks=xticks, labels=[f"{t.hour:02}" for t in xticks], rotation=90
+            )
+            ax.grid(True, which="both", linestyle="--", linewidth=0.5)
             ax.set_ylim(bottom=0)
 
         handles, labels = axes[0, 0].get_legend_handles_labels()
-        fig.legend(handles, labels, loc='upper center', bbox_to_anchor=(0.5, 0.995), ncol=4)
+        fig.legend(
+            handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.995), ncol=4
+        )
 
-        fig.text(0.5, 0.04, 'Time (Hour of Day)', ha='center', va='center')
-        fig.text(0.06, 0.5, f'Normalized {key_to_plot.upper()} Power', ha='center', va='center', rotation='vertical')
+        fig.text(0.5, 0.04, "Time (Hour of Day)", ha="center", va="center")
+        fig.text(
+            0.06,
+            0.5,
+            f"Normalized {key_to_plot.upper()} Power",
+            ha="center",
+            va="center",
+            rotation="vertical",
+        )
 
         if batch_idx is not None:
             title = f"Forecasts vs. Truth (Batch Index: {batch_idx})"
         else:
             title = "Forecasts vs. Truth"
         fig.suptitle(title, fontsize=20, y=1.03)
-        
+
         plt.tight_layout(rect=[0.08, 0.05, 0.95, 0.95])
-        
+
         return fig
