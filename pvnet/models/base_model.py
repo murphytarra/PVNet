@@ -1164,15 +1164,13 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
     ):
         """
         Plot a batch of data and the forecast from that batch.
-        Can handle point forecasts, quantile forecasts, or GMM forecasts by
-        inspecting the model's own configuration (self.use_gmm or self.use_quantile_regression).
+        Correctly handles slicing for point, quantile, and GMM forecasts.
         """
 
         y_key = key_to_plot
         y_id_key = f"{key_to_plot}_id"
         time_utc_key = f"{key_to_plot}_time_utc"
 
-        # Detach tensors and move to CPU for plotting
         y_true = batch[y_key].cpu()
         y_hat = y_hat.cpu()
         gsp_ids = batch[y_id_key].cpu().numpy().squeeze()
@@ -1182,13 +1180,9 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         )
         times_utc = [pd.to_datetime(t) for t in times_utc_np]
 
-        if timesteps_to_plot is not None:
-            start, end = timesteps_to_plot
-            y_true = y_true[:, start:end]
-            y_hat = y_hat[:, start:end]
-            times_utc = [t[start:end] for t in times_utc]
+        # The `timesteps_to_plot` logic is now handled inside each plotting branch.
 
-        batch_size, forecast_len = y_true.shape[-2], y_true.shape[-1]
+        batch_size = y_true.shape[0]
 
         fig, axes = plt.subplots(4, 4, figsize=(20, 18))
 
@@ -1197,42 +1191,62 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
                 ax.axis("off")
                 continue
 
-            # Plot ground truth
-            ax.plot(
-                times_utc[i],
-                y_true[i],
-                marker=".",
-                color="black",
-                label=r"True Value ($y$)",
-            )
+            current_y_true = y_true[i]
+            current_times_utc = times_utc[i]
+
+            # Plot ground truth - slice if needed
+            if timesteps_to_plot is not None:
+                start, end = timesteps_to_plot
+                ax.plot(
+                    current_times_utc[start:end],
+                    current_y_true[start:end],
+                    marker=".",
+                    color="black",
+                    label=r"True Value ($y$)",
+                )
+            else:
+                ax.plot(
+                    current_times_utc,
+                    current_y_true,
+                    marker=".",
+                    color="black",
+                    label=r"True Value ($y$)",
+                )
+
+            # --- Conditional Plotting Logic ---
 
             # 1. GMM Plotting
             if self.use_gmm:
-                # Call the existing method from the BaseModel
+                # First, parse the FULL y_hat to get parameters for all timesteps
                 mus, sigmas, pis = self._parse_gmm_params(y_hat[i : i + 1])
                 mus, sigmas, pis = mus.squeeze(0), sigmas.squeeze(0), pis.squeeze(0)
 
-                # Calculate mixture mean and standard deviation for visualization
+                # Now, slice the parsed parameters if a time range is specified
+                if timesteps_to_plot is not None:
+                    start, end = timesteps_to_plot
+                    mus, sigmas, pis = mus[start:end], sigmas[start:end], pis[start:end]
+                    plot_times = current_times_utc[start:end]
+                else:
+                    plot_times = current_times_utc
+
                 mixture_mean = torch.sum(pis * mus, dim=-1)
                 mixture_variance = torch.sum(
                     pis * (mus.pow(2) + sigmas.pow(2)), dim=-1
                 ) - mixture_mean.pow(2)
                 mixture_std = torch.sqrt(mixture_variance + 1e-6)
 
-                # Plot mixture mean
                 ax.plot(
-                    times_utc[i],
+                    plot_times,
                     mixture_mean.numpy(),
                     marker=".",
                     color="red",
                     label=r"Mixture Mean ($\hat{\mu}$)",
                 )
 
-                # Plot uncertainty (e.g., 90% confidence interval)
                 lower_bound = mixture_mean - 1.645 * mixture_std
                 upper_bound = mixture_mean + 1.645 * mixture_std
                 ax.fill_between(
-                    times_utc[i],
+                    plot_times,
                     lower_bound.numpy(),
                     upper_bound.numpy(),
                     color="red",
@@ -1240,57 +1254,71 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
                     label="90% Confidence",
                 )
 
-            # 2. Quantile Plotting
-            elif self.use_quantile_regression:
-                quantiles = self.output_quantiles
-                # Plot the median (0.5 quantile) as the main forecast line
-                median_idx = quantiles.index(0.5)
-                ax.plot(
-                    times_utc[i],
-                    y_hat[i, :, median_idx],
-                    marker=".",
-                    color="blue",
-                    label=r"Median Forecast ($\hat{y}_{0.5}$)",
-                )
-                # Plot other quantiles as shaded areas for uncertainty
-                num_quantiles = len(quantiles)
-                for j in range(num_quantiles // 2):
-                    lower_quantile = quantiles[j]
-                    upper_quantile = quantiles[num_quantiles - 1 - j]
-                    ax.fill_between(
-                        times_utc[i],
-                        y_hat[i, :, j],
-                        y_hat[i, :, num_quantiles - 1 - j],
-                        alpha=0.2,
+            # 2. Quantile or Point Forecast Plotting
+            else:
+                current_y_hat = y_hat[i]
+                # Slice y_hat here, which is safe for these shapes
+                if timesteps_to_plot is not None:
+                    start, end = timesteps_to_plot
+                    current_y_hat = current_y_hat[start:end]
+                    plot_times = current_times_utc[start:end]
+                else:
+                    plot_times = current_times_utc
+
+                if self.use_quantile_regression:
+                    quantiles = self.output_quantiles
+                    median_idx = quantiles.index(0.5)
+                    ax.plot(
+                        plot_times,
+                        current_y_hat[:, median_idx],
+                        marker=".",
                         color="blue",
-                        label=f"{lower_quantile:.2f} - {upper_quantile:.2f}",
+                        label=r"Median Forecast",
                     )
 
-            # 3. Simple Point Forecast Plotting
-            else:
-                ax.plot(
-                    times_utc[i],
-                    y_hat[i],
-                    marker=".",
-                    color="green",
-                    label=r"Point Forecast ($\hat{y}$)",
-                )
+                    num_quantiles = len(quantiles)
+                    for j in range(num_quantiles // 2):
+                        lower_q, upper_q = (
+                            quantiles[j],
+                            quantiles[num_quantiles - 1 - j],
+                        )
+                        ax.fill_between(
+                            plot_times,
+                            current_y_hat[:, j],
+                            current_y_hat[:, num_quantiles - 1 - j],
+                            alpha=0.2,
+                            color="blue",
+                            label=f"{lower_q*100:.0f}-{upper_q*100:.0f}%",
+                        )
+                else:  # Simple point forecast
+                    ax.plot(
+                        plot_times,
+                        current_y_hat,
+                        marker=".",
+                        color="green",
+                        label=r"Point Forecast",
+                    )
 
             ax.set_title(
                 f"ID: {gsp_ids[i]} | {times_utc[i][0].date()}", fontsize="medium"
             )
-            xticks = [t for t in times_utc[i] if t.minute == 0][::2]
+            plot_times_for_ticks = (
+                current_times_utc[slice(timesteps_to_plot[0], timesteps_to_plot[1])]
+                if timesteps_to_plot
+                else current_times_utc
+            )
+            xticks = [t for t in plot_times_for_ticks if t.minute == 0][::2]
             ax.set_xticks(
                 ticks=xticks, labels=[f"{t.hour:02}" for t in xticks], rotation=90
             )
             ax.grid(True, which="both", linestyle="--", linewidth=0.5)
             ax.set_ylim(bottom=0)
 
+        # Common figure formatting
         handles, labels = axes[0, 0].get_legend_handles_labels()
         fig.legend(
             handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.995), ncol=4
         )
-
         fig.text(0.5, 0.04, "Time (Hour of Day)", ha="center", va="center")
         fig.text(
             0.06,
@@ -1300,13 +1328,12 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
             va="center",
             rotation="vertical",
         )
-
-        if batch_idx is not None:
-            title = f"Forecasts vs. Truth (Batch Index: {batch_idx})"
-        else:
-            title = "Forecasts vs. Truth"
+        title = (
+            f"Forecasts vs. Truth (Batch Index: {batch_idx})"
+            if batch_idx is not None
+            else "Forecasts vs. Truth"
+        )
         fig.suptitle(title, fontsize=20, y=1.03)
-
         plt.tight_layout(rect=[0.08, 0.05, 0.95, 0.95])
 
         return fig
