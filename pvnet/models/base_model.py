@@ -800,6 +800,9 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
 
         losses = {}
 
+        # Calculate CRPS
+        losses["CRPS"] = self._calculate_crps(y, y_hat)
+
         if self.use_quantile_regression:
             # Add fraction below each quantile for calibration
             for i, quantile in enumerate(self.output_quantiles):
@@ -827,9 +830,6 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         y_persist = y[:, -1].unsqueeze(1).expand(-1, self.forecast_len)
         losses["MAE_persistence/val"] = F.l1_loss(y_persist, y)
         losses["MSE_persistence/val"] = F.mse_loss(y_persist, y)
-
-        # Calculate CRPS
-        losses["CRPS"] = self._calculate_crps(y, y_hat)
 
         # Log persistance loss at each time horizon
         losses.update(self._step_mae_and_mse(y, y_persist, dict_key_root="persistence"))
