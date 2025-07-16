@@ -11,8 +11,10 @@ from typing import Dict, Optional, Union
 import hydra
 import lightning.pytorch as pl
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import pkg_resources
+import properscoring as ps
 import torch
 import torch.nn.functional as F
 import wandb
@@ -750,6 +752,33 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
 
         return losses
 
+    def _calculate_crps(self, y_true, y_hat):
+        """
+        Calculate the Continuous Ranked Probability Score using properscoring.
+        """
+        y_true_np = y_true.detach().cpu().numpy()
+
+        if self.use_gmm:
+            mus, sigmas, pis = self._parse_gmm_params(y_hat)
+            mus_np = mus.detach().cpu().numpy()
+            pis_np = pis.detach().cpu().numpy()
+
+            # We treat the GMM components as a weighted ensemble.
+            scores = ps._crps.crps_ensemble(
+                y_true_np, mus_np, weights=pis_np, issorted=False
+            )
+
+        elif self.use_quantile_regression:
+            y_quantiles_np = y_hat.detach().cpu().numpy()
+
+            # Compute the CRPS for the empirical CDF of the members.
+            scores = ps.crps_ensemble(y_true_np, y_quantiles_np)
+
+        else:
+            scores = np.nan
+
+        return torch.tensor(torch.mean(scores), device=self.device)
+
     def _step_mae_and_mse(self, y, y_hat, dict_key_root):
         """Calculate the MSE and MAE at each forecast step"""
         losses = {}
@@ -798,6 +827,9 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         y_persist = y[:, -1].unsqueeze(1).expand(-1, self.forecast_len)
         losses["MAE_persistence/val"] = F.l1_loss(y_persist, y)
         losses["MSE_persistence/val"] = F.mse_loss(y_persist, y)
+
+        # Calculate CRPS
+        losses["CRPS"] = self._calculate_crps(y, y_hat)
 
         # Log persistance loss at each time horizon
         losses.update(self._step_mae_and_mse(y, y_persist, dict_key_root="persistence"))
