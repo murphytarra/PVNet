@@ -777,7 +777,7 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         else:
             scores = np.nan
 
-        return torch.tensor(torch.mean(scores), device=self.device)
+        return torch.tensor(np.mean(scores), device=self.device)
 
     def _step_mae_and_mse(self, y, y_hat, dict_key_root):
         """Calculate the MSE and MAE at each forecast step"""
