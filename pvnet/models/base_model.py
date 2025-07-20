@@ -483,9 +483,7 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         forecast_minutes: int,
         optimizer: AbstractOptimizer,
         output_quantiles: Optional[list[float]] = None,
-        num_gmm_components: Optional[
-            int
-        ] = None,  # Adding the num of GMM components to the model
+        num_gmm_components: Optional[int] = None,
         target_key: str = "gsp",
         interval_minutes: int = 30,
         timestep_intervals_to_plot: Optional[list[int]] = None,
@@ -500,7 +498,8 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
             optimizer (AbstractOptimizer): Optimizer
             output_quantiles: A list of float (0.0, 1.0) quantiles to predict values for. If set to
                 None the output is a single value.
-            num_gmm_components: Number of GMM components to use for the model.
+            num_gmm_components: Number of Gaussian Mixture Model components to use for the model. If set to None,
+                output quantiles must be set. If  both None, the output is a single value.
             target_key: The key of the target variable in the batch
             interval_minutes: The interval in minutes between each timestep in the data
             timestep_intervals_to_plot: Intervals, in timesteps, to plot during training
@@ -565,7 +564,8 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         if self.use_quantile_regression:
             self.num_output_features = self.forecast_len * len(self.output_quantiles)
 
-        # Here we assume that the GMM outputs 3 parameters per component - this is the mean, std and weight
+        # Here we assume that the GMM outputs 3 parameters per component
+        #   - this is the mean, std and weight
         elif self.use_gmm:
             self.num_output_features = self.forecast_len * self.num_gmm_components * 3
         else:
@@ -627,13 +627,14 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
     def _parse_gmm_params(self, y_gmm):
         """
         Reshape flat output into (μ, σ, π) tensors.
+
         y_gmm: (batch, forecast_len * num_components * 3)
 
         Returns:
             mus:    (batch, forecast_len, num_components)
             sigmas: (batch, forecast_len, num_components)
             pis:    (batch, forecast_len, num_components)
-        """  # noqa: D205
+        """
         bsz = y_gmm.shape[0]
         # reshape to [batch, forecast_len, num_components, 3]
         params = y_gmm.view(
@@ -643,9 +644,10 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
             3,
         )
         mus = params[..., 0]
-        sigmas = F.softplus(params[..., 1]) + 1e-3  # enforce positivity & stability
-        logits = params[..., 2]
+        # enforce positivity & stability
+        sigmas = F.softplus(params[..., 1]) + 1e-3
         # softmax over components to get mixture weights
+        logits = params[..., 2]
         pis = F.softmax(logits, dim=-1)
         return mus, sigmas, pis
 
@@ -672,8 +674,12 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
     def _gmm_to_prediction(self, y_gmm):
         """
         Compute the mixture’s expectation E[Y] = Σ π_i μ_i
+
+        Args:
+            y_gmm:   (batch, forecast_len * num_components * 3)
+
         Returns shape (batch, forecast_len)
-        """  # noqa: D205
+        """
         mus, sigmas, pis = self._parse_gmm_params(y_gmm)
         # expectation over components
         y_pred = (pis * mus).sum(dim=-1)  # Here we sum over the components
@@ -707,9 +713,11 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
     def _calculate_gmm_loss(self, y_gmm, y_true):
         """
         Negative log-likelihood of y_true under the predicted GMM.
-        y_gmm:   (batch, forecast_len * num_components * 3)
-        y_true:  (batch, forecast_len)
-        """  # noqa: D205
+
+        Args:
+            y_gmm:   (batch, forecast_len * num_components * 3)
+            y_true:  (batch, forecast_len)
+        """
         mus, sigmas, pis = self._parse_gmm_params(y_gmm)
         # expand y_true to [batch, forecast_len, num_components]
         y_exp = y_true.unsqueeze(-1).expand_as(mus)
@@ -725,10 +733,21 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         return nll
 
     def _calculate_common_losses(self, y, y_hat):
-        """Calculate losses common to train, and val"""
+        """
+        Calculate losses common to train, and val.
+
+        Args:
+            y: Target values
+            y_hat: Model predictions
+
+        Returns:
+            losses: Dictionary of calculated losses
+        """
 
         losses = {}
 
+        # Check if the model is using quantile regression or GMM.
+        # If so, we use the appropriate loss function
         if self.use_quantile_regression:
             losses["quantile_loss"] = self._calculate_quantile_loss(y_hat, y)
             y_hat = self._quantiles_to_prediction(y_hat)
@@ -754,8 +773,22 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
 
     def _calculate_crps(self, y_true, y_hat):
         """
-        Calculate the Continuous Ranked Probability Score using properscoring.
+        Compute the Continuous Ranked Probability Score (CRPS) for probabilistic forecasts.
+        The CRPS is a widely used metric for evaluating the accuracy of probabilistic predictions.
+
+        This method supports two types of probabilistic models: Gaussian Mixture Models (GMM) and
+        quantile regression outputs. The calculation is performed using the `properscoring` library.
+
+        Args:
+            y_true (torch.Tensor): The true values, shape (batch_size, forecast_len).
+            y_hat (torch.Tensor): The predicted values, either GMM parameters or quantiles,
+                shape (batch_size, forecast_len * num_components * 3) for GMM or
+                (batch_size, forecast_len, num_quantiles) for quantile regression.
+
+        Returns:
+            torch.Tensor: The mean CRPS score across the batch, shape (1,).
         """
+
         y_true_np = y_true.detach().cpu().numpy()
 
         if self.use_gmm:
@@ -816,7 +849,6 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
             # Take median value for remaining metric calculations
             y_hat = self._quantiles_to_prediction(y_hat)
 
-        # Not too sure if this is correct/needed?
         elif self.use_gmm:
             # Calculate the GMM loss
             losses["gmm_loss/val"] = self._calculate_gmm_loss(y_hat, y)
@@ -918,8 +950,6 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
 
         try:
             if self.logger is not None and hasattr(self.logger.experiment, "log"):
-                import wandb
-
                 self.logger.experiment.log({plot_name: wandb.Image(fig)})
         except Exception as e:
             print(f"Failed to log {plot_name} to logger")
@@ -964,6 +994,7 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
                 results["y_pred"] = row_pred[:, self.output_quantiles.index(0.5)]
 
             elif self.use_gmm:
+                # Need to change this and use parse instead
                 # reshape into (forecast_len, components, 3)
                 comps = row_pred.reshape(self.forecast_len, self.num_gmm_components, 3)
                 mus = comps[..., 0]
@@ -1223,7 +1254,6 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
             )
 
             # --- Conditional Plotting Logic for y_hat (which is forecast-only) ---
-
             if self.use_gmm:
                 mus, sigmas, pis = self._parse_gmm_params(y_hat[i : i + 1])
                 mus, sigmas, pis = mus.squeeze(0), sigmas.squeeze(0), pis.squeeze(0)
