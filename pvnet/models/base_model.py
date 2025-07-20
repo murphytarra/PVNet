@@ -957,73 +957,80 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         finally:
             plt.close(fig)
 
-    def _log_validation_results(self, batch, y_hat, accum_batch_num):
-        """Append validation results to self.validation_epoch_results"""
 
-        # ground truth, (b, forecast_len)
-        y_np = batch[self._target_key][:, -self.forecast_len :].detach().cpu().numpy()
-        time_np = (
-            batch[f"{self._target_key}_time_utc"][:, -self.forecast_len :]
-            .detach()
-            .cpu()
-            .numpy()
-        )
-        id_np = batch[f"{self._target_key}_id"].detach().cpu().numpy().squeeze()
-        y_hat_np = y_hat.detach().cpu().numpy()  # shape varies by mode
+def _log_validation_results(self, batch, y_hat, accum_batch_num):
+    """Append validation results to self.validation_epoch_results"""
 
-        batch_size = y_np.shape[0]
+    y_true_np = batch[self._target_key][:, -self.forecast_len :].detach().cpu().numpy()
+    time_np = (
+        batch[f"{self._target_key}_time_utc"][:, -self.forecast_len :]
+        .detach()
+        .cpu()
+        .numpy()
+    )
+    id_np = batch[f"{self._target_key}_id"].detach().cpu().numpy().squeeze()
 
-        for idx in range(batch_size):
-            row_y = y_np[idx]
-            row_time = time_np[idx]
-            row_id = id_np[idx]
-            row_pred = y_hat_np[
-                idx
-            ]  # shape: (forecast_len, Q) or (forecast_len, 3*C) or (forecast_len,)
+    y_hat_cpu = y_hat.detach().cpu()
+    batch_size = y_true_np.shape[0]
 
-            results = {
-                "y": row_y,
-                "time_utc": row_time,
-            }
+    if self.use_gmm:
+        # Returns (mus, sigmas, pis) each of shape (batch, forecast_len, n_comp)
+        mus_t, sigmas_t, pis_t = self._parse_gmm_params(y_hat_cpu)
+        mus_np = mus_t.numpy()
+        sigmas_np = sigmas_t.numpy()
+        pis_np = pis_t.numpy()
+    elif self.use_quantile_regression:
+        quant_np = y_hat_cpu.numpy()
+    else:
+        point_np = y_hat_cpu.numpy()
 
-            if self.use_quantile_regression:
-                # unpack quantiles
-                for q_idx, q in enumerate(self.output_quantiles):
-                    results[f"y_quantile_{q}"] = row_pred[:, q_idx]
-                # point forecast = median
-                results["y_pred"] = row_pred[:, self.output_quantiles.index(0.5)]
+    for idx in range(batch_size):
+        row_y = y_true_np[idx]
+        row_time = time_np[idx]
+        row_id = id_np[idx]
 
-            elif self.use_gmm:
-                # Need to change this and use parse instead
-                # reshape into (forecast_len, components, 3)
-                comps = row_pred.reshape(self.forecast_len, self.num_gmm_components, 3)
-                mus = comps[..., 0]
-                raw_sig = torch.from_numpy(comps[..., 1]).float()
-                sigs = F.softplus(raw_sig).numpy()
-                logits = comps[..., 2]
-                # compute mixture weights
-                pis = F.softmax(torch.from_numpy(logits), dim=-1).numpy()
+        results = {
+            "y": row_y,
+            "time_utc": row_time,
+        }
 
-                mix_mean = (pis * mus).sum(axis=-1)
-                results["y_pred"] = mix_mean
+        if self.use_quantile_regression:
+            row_q = quant_np[idx]
+            # unpack each quantile
+            for q_idx, q in enumerate(self.output_quantiles):
+                results[f"y_quantile_{q}"] = row_q[:, q_idx]
+            # median as point forecast
+            med_idx = self.output_quantiles.index(0.5)
+            results["y_pred"] = row_q[:, med_idx]
 
-                for c in range(self.num_gmm_components):
-                    results[f"y_gmm_mean_{c}"] = mus[:, c]
-                    results[f"y_gmm_std_{c}"] = sigs[:, c]
-                    results[f"y_gmm_weight_{c}"] = pis[:, c]
+        elif self.use_gmm:
+            row_mus = mus_np[idx]  # (forecast_len, n_comp)
+            row_sigs = sigmas_np[idx]
+            row_pis = pis_np[idx]
 
-            else:
-                # simple point mode
-                results["y_pred"] = row_pred
-                results["y_hat"] = row_pred
+            # mixture mean
+            mix_mean = (row_pis * row_mus).sum(axis=-1)
+            results["y_pred"] = mix_mean
 
-            results["error"] = results["y"] - results["y_pred"]
-            df = pd.DataFrame(results)
-            df["id"] = row_id
-            df["batch_idx"] = accum_batch_num
-            df["example_idx"] = idx
+            # component‐wise stats
+            for c in range(self.num_gmm_components):
+                results[f"y_gmm_mean_{c}"] = row_mus[:, c]
+                results[f"y_gmm_std_{c}"] = row_sigs[:, c]
+                results[f"y_gmm_weight_{c}"] = row_pis[:, c]
 
-            self.validation_epoch_results.append(df)
+        else:
+            row_p = point_np[idx]  # (forecast_len,)
+            results["y_pred"] = row_p
+            results["y_hat"] = row_p
+
+        # error & DataFrame creation
+        results["error"] = results["y"] - results["y_pred"]
+        df = pd.DataFrame(results)
+        df["id"] = row_id
+        df["batch_idx"] = accum_batch_num
+        df["example_idx"] = idx
+
+        self.validation_epoch_results.append(df)
 
     def validation_step(self, batch: dict, batch_idx):
         """Run validation step"""
