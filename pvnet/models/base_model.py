@@ -1,6 +1,5 @@
 """Base model for all PVNet submodels"""
 
-import copy
 import logging
 import os
 import tempfile
@@ -576,47 +575,49 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         self.save_validation_results_csv = save_validation_results_csv
 
     def _adapt_batch(self, batch):
-        """Slice batches into appropriate shapes for model.
-
-        Returns a new batch dictionary with adapted data, leaving the original batch unchanged.
-        We make some specific assumptions about the original batch and the derived sliced batch:
-        - We are only limiting the future projections. I.e. we are never shrinking the batch from
-          the left hand side of the time axis, only slicing it from the right
-        - We are only shrinking the spatial crop of the satellite and NWP data
-
         """
-        # Create a copy of the batch to avoid modifying the original
-        new_batch = {key: copy.deepcopy(value) for key, value in batch.items()}
+        Slice batches into appropriate shapes for model without modifying the original batch in-place.
+        Avoids expensive deepcopy. Only slices/crops what's needed.
+        """
+        new_batch = {}
 
-        if "gsp" in new_batch.keys():
-            # Slice off the end of the GSP data
+        if "gsp" in batch:
             gsp_len = self.forecast_len + self.history_len + 1
-            new_batch["gsp"] = new_batch["gsp"][:, :gsp_len]
-            new_batch["gsp_time_utc"] = new_batch["gsp_time_utc"][:, :gsp_len]
+            new_batch["gsp"] = batch["gsp"][:, :gsp_len]
+            new_batch["gsp_time_utc"] = batch["gsp_time_utc"][:, :gsp_len]
 
         if self.include_sat:
-            # Slice off the end of the satellite data and spatially crop
-            # Shape: batch_size, seq_length, channel, height, width
             new_batch["satellite_actual"] = center_crop(
-                new_batch["satellite_actual"][:, : self.sat_sequence_len],
+                batch["satellite_actual"][:, : self.sat_sequence_len],
                 output_size=self.sat_encoder.image_size_pixels,
             )
 
         if self.include_nwp:
-            # Slice off the end of the NWP data and spatially crop
+            new_batch["nwp"] = {}
             for nwp_source in self.nwp_encoders_dict:
-                # shape: batch_size, seq_len, n_chans, height, width
-                new_batch["nwp"][nwp_source]["nwp"] = center_crop(
-                    new_batch["nwp"][nwp_source]["nwp"],
+                nwp_data = batch["nwp"][nwp_source]["nwp"]
+                cropped = center_crop(
+                    nwp_data,
                     output_size=self.nwp_encoders_dict[nwp_source].image_size_pixels,
                 )[:, : self.nwp_encoders_dict[nwp_source].sequence_length]
+                new_batch["nwp"][nwp_source] = {"nwp": cropped}
 
         if self.include_sun:
             sun_len = self.forecast_len + self.history_len + 1
-            # Slice off end of solar coords
             for s in ["solar_azimuth", "solar_elevation"]:
-                if s in new_batch.keys():
-                    new_batch[s] = new_batch[s][:, :sun_len]
+                if s in batch:
+                    new_batch[s] = batch[s][:, :sun_len]
+
+        # Copy over any other untouched keys (like IDs, etc.)
+        passthrough_keys = [
+            "gsp_id",
+            "gsp_time_utc",
+            "nwp_time_utc",
+            "satellite_time_utc",
+        ]
+        for key in passthrough_keys:
+            if key in batch and key not in new_batch:
+                new_batch[key] = batch[key]
 
         return new_batch
 
