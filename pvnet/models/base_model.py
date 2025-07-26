@@ -735,6 +735,41 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         nll = -log_probs.mean()  # mean over batch & horizon
         return nll
 
+    def _sample_from_gmm(self, mus, sigmas, pis, n_samples=20):
+        """
+        Sample from Gaussian Mixture Model for each timestep and batch.
+
+        Args:
+            mus:    [batch, horizon, components]
+            sigmas: [batch, horizon, components]
+            pis:    [batch, horizon, components]
+            n_samples: Number of samples to draw
+
+        Returns:
+            samples: [n_samples, batch, horizon]
+        """
+        batch, horizon, num_components = mus.shape
+
+        # Sample component indices according to mixture weights (pis)
+        categorical = torch.distributions.Categorical(pis)
+        component_indices = categorical.sample(
+            (n_samples,)
+        )  # [n_samples, batch, horizon]
+
+        # Gather the corresponding μ and σ for each sampled index
+        mus_samples = mus.unsqueeze(0).expand(n_samples, -1, -1, -1)
+        sigmas_samples = sigmas.unsqueeze(0).expand(n_samples, -1, -1, -1)
+
+        idx = component_indices.unsqueeze(-1)
+        gathered_mus = torch.gather(mus_samples, dim=3, index=idx).squeeze(-1)
+        gathered_sigmas = torch.gather(sigmas_samples, dim=3, index=idx).squeeze(-1)
+
+        # Sample from the normal distribution
+        normal = torch.distributions.Normal(gathered_mus, gathered_sigmas)
+        samples = normal.sample()  # [n_samples, batch, horizon]
+
+        return samples
+
     def _calculate_common_losses(self, y, y_hat):
         """
         Calculate losses common to train, and val.
