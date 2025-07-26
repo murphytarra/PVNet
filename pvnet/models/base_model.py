@@ -16,6 +16,7 @@ import pkg_resources
 import properscoring as ps
 import torch
 import torch.nn.functional as F
+from torchmetrics.regression import ContinuousRankedProbabilityScore
 import wandb
 import yaml
 from huggingface_hub import ModelCard, ModelCardData, PyTorchModelHubMixin
@@ -570,6 +571,9 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         else:
             self.num_output_features = self.forecast_len
 
+        # CRPS 
+        self.crps_metric = ContinuousRankedProbabilityScore(reduction="mean")
+
         # save all validation results to array, so we can save these to weights n biases
         self.validation_epoch_results = []
         self.save_validation_results_csv = save_validation_results_csv
@@ -611,7 +615,7 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         # Copy over any other untouched keys (like IDs, etc.)
         passthrough_keys = [
             "gsp_id",
-            "gsp_time_utc",
+            "gsp_time_utc",ƒ
             "nwp_time_utc",
             "satellite_time_utc",
         ]
@@ -772,47 +776,6 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
 
         return losses
 
-    def _calculate_crps(self, y_true, y_hat):
-        """
-        Compute the Continuous Ranked Probability Score (CRPS) for probabilistic forecasts.
-        The CRPS is a widely used metric for evaluating the accuracy of probabilistic predictions.
-
-        This method supports two types of probabilistic models: Gaussian Mixture Models (GMM) and
-        quantile regression outputs. The calculation is performed using the `properscoring` library.
-
-        Args:
-            y_true (torch.Tensor): The true values, shape (batch_size, forecast_len).
-            y_hat (torch.Tensor): The predicted values, either GMM parameters or quantiles,
-                shape (batch_size, forecast_len * num_components * 3) for GMM or
-                (batch_size, forecast_len, num_quantiles) for quantile regression.
-
-        Returns:
-            torch.Tensor: The mean CRPS score across the batch, shape (1,).
-        """
-
-        y_true_np = y_true.detach().cpu().numpy()
-
-        if self.use_gmm:
-            mus, sigmas, pis = self._parse_gmm_params(y_hat)
-            mus_np = mus.detach().cpu().numpy()
-            pis_np = pis.detach().cpu().numpy()
-
-            # We treat the GMM components as a weighted ensemble.
-            scores = ps._crps.crps_ensemble(
-                y_true_np, mus_np, weights=pis_np, issorted=False
-            )
-
-        elif self.use_quantile_regression:
-            y_quantiles_np = y_hat.detach().cpu().numpy()
-
-            # Compute the CRPS for the empirical CDF of the members.
-            scores = ps.crps_ensemble(y_true_np, y_quantiles_np)
-
-        else:
-            scores = np.nan
-
-        return torch.tensor(np.mean(scores), device=self.device)
-
     def _step_mae_and_mse(self, y, y_hat, dict_key_root):
         """Calculate the MSE and MAE at each forecast step"""
         losses = {}
@@ -835,7 +798,28 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         losses = {}
 
         # Calculate CRPS
-        losses["CRPS"] = self._calculate_crps(y, y_hat)
+        if self.use_quantile_regression:
+            # y_hat: [batch, horizon, num_quantiles]
+            b, h, q = y_hat.shape
+            crps = self.crps_metric(y_hat.reshape(b * h, q), y.reshape(-1))
+            losses["CRPS"] = crps
+
+        if self.use_gmm:
+            # Convert GMM into samples or quantiles
+            mus, sigmas, pis = self._parse_gmm_params(y_hat)  # shape: [B, H, C]
+
+            # Sample from GMM to get an ensemble of predictions
+            num_samples = 20
+            samples = self._sample_from_gmm(mus, sigmas, pis, n_samples=num_samples)
+            # samples: [num_samples, batch, forecast_len]
+
+            # reshape for TorchMetrics: [batch * forecast_len, ensemble_members]
+            ensemble = samples.permute(1, 2, 0).reshape(-1, num_samples)  # [B*H, N]
+            targets = y.reshape(-1)  # [B*H]
+
+            crps = self.crps_metric(ensemble, targets)
+            losses["CRPS"] = crps
+
 
         if self.use_quantile_regression:
             # Add fraction below each quantile for calibration
@@ -958,80 +942,54 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         finally:
             plt.close(fig)
 
+    def _log_validation_results(self, batch, y_hat, accum_batch_num):
+        """Efficient logging with all Torch tensors; no NumPy unless saving."""
 
-def _log_validation_results(self, batch, y_hat, accum_batch_num):
-    """Append validation results to self.validation_epoch_results"""
+        y_true = batch[self._target_key][:, -self.forecast_len:]
+        times = batch[f"{self._target_key}_time_utc"][:, -self.forecast_len:]
+        ids = batch[f"{self._target_key}_id"].squeeze()
 
-    y_true_np = batch[self._target_key][:, -self.forecast_len :].detach().cpu().numpy()
-    time_np = (
-        batch[f"{self._target_key}_time_utc"][:, -self.forecast_len :]
-        .detach()
-        .cpu()
-        .numpy()
-    )
-    id_np = batch[f"{self._target_key}_id"].detach().cpu().numpy().squeeze()
+        y_hat = y_hat  # already tensor
 
-    y_hat_cpu = y_hat.detach().cpu()
-    batch_size = y_true_np.shape[0]
+        batch_size = y_true.shape[0]
+        horizon = self.forecast_len
 
-    if self.use_gmm:
-        # Returns (mus, sigmas, pis) each of shape (batch, forecast_len, n_comp)
-        mus_t, sigmas_t, pis_t = self._parse_gmm_params(y_hat_cpu)
-        mus_np = mus_t.numpy()
-        sigmas_np = sigmas_t.numpy()
-        pis_np = pis_t.numpy()
-    elif self.use_quantile_regression:
-        quant_np = y_hat_cpu.numpy()
-    else:
-        point_np = y_hat_cpu.numpy()
-
-    for idx in range(batch_size):
-        row_y = y_true_np[idx]
-        row_time = time_np[idx]
-        row_id = id_np[idx]
-
-        results = {
-            "y": row_y,
-            "time_utc": row_time,
+        records = {
+            "id": ids.repeat_interleave(horizon),
+            "batch_idx": torch.full((batch_size * horizon,), accum_batch_num),
+            "example_idx": torch.arange(batch_size).repeat_interleave(horizon),
+            "time_utc": times.reshape(-1),
+            "y": y_true.reshape(-1),
         }
 
         if self.use_quantile_regression:
-            row_q = quant_np[idx]
-            # unpack each quantile
+            # y_hat: (batch, horizon, num_quantiles)
             for q_idx, q in enumerate(self.output_quantiles):
-                results[f"y_quantile_{q}"] = row_q[:, q_idx]
-            # median as point forecast
-            med_idx = self.output_quantiles.index(0.5)
-            results["y_pred"] = row_q[:, med_idx]
+                records[f"y_quantile_{q}"] = y_hat[:, :, q_idx].reshape(-1)
+
+            median_idx = self.output_quantiles.index(0.5)
+            records["y_pred"] = y_hat[:, :, median_idx].reshape(-1)
 
         elif self.use_gmm:
-            row_mus = mus_np[idx]  # (forecast_len, n_comp)
-            row_sigs = sigmas_np[idx]
-            row_pis = pis_np[idx]
+            mus, sigmas, pis = self._parse_gmm_params(y_hat)  # tensors
+            y_pred = torch.sum(pis * mus, dim=-1)  # (batch, horizon)
+            records["y_pred"] = y_pred.reshape(-1)
 
-            # mixture mean
-            mix_mean = (row_pis * row_mus).sum(axis=-1)
-            results["y_pred"] = mix_mean
-
-            # component‐wise stats
             for c in range(self.num_gmm_components):
-                results[f"y_gmm_mean_{c}"] = row_mus[:, c]
-                results[f"y_gmm_std_{c}"] = row_sigs[:, c]
-                results[f"y_gmm_weight_{c}"] = row_pis[:, c]
+                records[f"y_gmm_mean_{c}"] = mus[:, :, c].reshape(-1)
+                records[f"y_gmm_std_{c}"] = sigmas[:, :, c].reshape(-1)
+                records[f"y_gmm_weight_{c}"] = pis[:, :, c].reshape(-1)
 
         else:
-            row_p = point_np[idx]  # (forecast_len,)
-            results["y_pred"] = row_p
-            results["y_hat"] = row_p
+            records["y_pred"] = y_hat.reshape(-1)
+            records["y_hat"] = y_hat.reshape(-1)
 
-        # error & DataFrame creation
-        results["error"] = results["y"] - results["y_pred"]
-        df = pd.DataFrame(results)
-        df["id"] = row_id
-        df["batch_idx"] = accum_batch_num
-        df["example_idx"] = idx
+        # Error
+        records["error"] = records["y"] - records["y_pred"]
 
-        self.validation_epoch_results.append(df)
+        # Only convert to pandas (and CPU) if needed for logging or CSV output
+        self.validation_epoch_results.append(records)
+
 
     def validation_step(self, batch: dict, batch_idx):
         """Run validation step"""
@@ -1163,6 +1121,8 @@ def _log_validation_results(self, batch, y_hat, accum_batch_num):
             validation_results_df["error"] = (
                 validation_results_df["y"] - validation_results_df["y_pred"]
             )
+
+            self.crps_metric.reset()
 
             if self.save_validation_results_csv:
                 with tempfile.TemporaryDirectory() as tempdir:
