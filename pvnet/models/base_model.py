@@ -570,7 +570,7 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
             self.num_output_features = self.forecast_len
 
         # CRPS
-        self.crps_metric = ContinuousRankedProbabilityScore(reduction="mean")
+        self.crps_metric = ContinuousRankedProbabilityScore()
 
         # save all validation results to array, so we can save these to weights n biases
         self.validation_epoch_results = []
