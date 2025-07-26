@@ -10,13 +10,10 @@ from typing import Dict, Optional, Union
 import hydra
 import lightning.pytorch as pl
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 import pkg_resources
-import properscoring as ps
 import torch
 import torch.nn.functional as F
-from torchmetrics.regression import ContinuousRankedProbabilityScore
 import wandb
 import yaml
 from huggingface_hub import ModelCard, ModelCardData, PyTorchModelHubMixin
@@ -25,6 +22,7 @@ from huggingface_hub.file_download import hf_hub_download
 from huggingface_hub.hf_api import HfApi
 from ocf_data_sampler.torch_datasets.sample.base import copy_batch_to_device
 from torch.distributions import Normal
+from torchmetrics.regression import ContinuousRankedProbabilityScore
 from torchvision.transforms.functional import center_crop
 
 from pvnet.models.utils import (
@@ -571,7 +569,7 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         else:
             self.num_output_features = self.forecast_len
 
-        # CRPS 
+        # CRPS
         self.crps_metric = ContinuousRankedProbabilityScore(reduction="mean")
 
         # save all validation results to array, so we can save these to weights n biases
@@ -615,7 +613,7 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
         # Copy over any other untouched keys (like IDs, etc.)
         passthrough_keys = [
             "gsp_id",
-            "gsp_time_utc",ƒ
+            "gsp_time_utc",
             "nwp_time_utc",
             "satellite_time_utc",
         ]
@@ -820,7 +818,6 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
             crps = self.crps_metric(ensemble, targets)
             losses["CRPS"] = crps
 
-
         if self.use_quantile_regression:
             # Add fraction below each quantile for calibration
             for i, quantile in enumerate(self.output_quantiles):
@@ -945,8 +942,8 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
     def _log_validation_results(self, batch, y_hat, accum_batch_num):
         """Efficient logging with all Torch tensors; no NumPy unless saving."""
 
-        y_true = batch[self._target_key][:, -self.forecast_len:]
-        times = batch[f"{self._target_key}_time_utc"][:, -self.forecast_len:]
+        y_true = batch[self._target_key][:, -self.forecast_len :]
+        times = batch[f"{self._target_key}_time_utc"][:, -self.forecast_len :]
         ids = batch[f"{self._target_key}_id"].squeeze()
 
         y_hat = y_hat  # already tensor
@@ -989,7 +986,6 @@ class BaseModel(pl.LightningModule, PVNetModelHubMixin):
 
         # Only convert to pandas (and CPU) if needed for logging or CSV output
         self.validation_epoch_results.append(records)
-
 
     def validation_step(self, batch: dict, batch_idx):
         """Run validation step"""
