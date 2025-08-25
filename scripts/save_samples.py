@@ -42,7 +42,10 @@ import sys
 
 import dask
 import hydra
-from ocf_data_sampler.torch_datasets.datasets import PVNetUKRegionalDataset, SitesDataset
+from ocf_data_sampler.torch_datasets.datasets import (
+    PVNetUKRegionalDataset,
+    SitesDataset,
+)
 from ocf_data_sampler.torch_datasets.sample.site import SiteSample
 from ocf_data_sampler.torch_datasets.sample.uk_regional import UKRegionalSample
 from omegaconf import DictConfig, OmegaConf
@@ -89,9 +92,9 @@ class SaveFuncFactory:
 
 
 def get_dataset(
-    config_path: str, 
-    start_time: str, 
-    end_time: str, 
+    config_path: str,
+    start_time: str,
+    end_time: str,
     renewable: str = "pv_uk",
 ) -> Dataset:
     """Get the dataset for the given renewable type."""
@@ -141,7 +144,9 @@ def main(config: DictConfig) -> None:
         f.write(OmegaConf.to_yaml(config_dm))
 
     # Copy the data config
-    shutil.copyfile(config_dm.configuration, f"{config_dm.sample_output_dir}/{DATA_CONFIG_NAME}")
+    shutil.copyfile(
+        config_dm.configuration, f"{config_dm.sample_output_dir}/{DATA_CONFIG_NAME}"
+    )
 
     # Define the keywargs going into the train and val dataloaders
     dataloader_kwargs = dict(

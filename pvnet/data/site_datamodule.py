@@ -1,4 +1,4 @@
-""" Data module for pytorch lightning """
+"""Data module for pytorch lightning"""
 
 from ocf_data_sampler.torch_datasets.datasets.site import SitesDataset
 from ocf_data_sampler.torch_datasets.sample.site import SiteSample
@@ -22,8 +22,8 @@ class SiteStreamedDataModule(BaseStreamedDataModule):
     """Datamodule which streams samples using sampler for ocf-data-sampler."""
 
     def _get_streamed_samples_dataset(
-        self,
-        start_time: str | None,
-        end_time: str | None
+        self, start_time: str | None, end_time: str | None
     ) -> Dataset:
-        return SitesDataset(self.configuration, start_time=start_time, end_time=end_time)
+        return SitesDataset(
+            self.configuration, start_time=start_time, end_time=end_time
+        )

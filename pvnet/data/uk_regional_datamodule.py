@@ -1,4 +1,4 @@
-""" Data module for pytorch lightning """
+"""Data module for pytorch lightning"""
 
 from ocf_data_sampler.torch_datasets.datasets.pvnet_uk import PVNetUKRegionalDataset
 from ocf_data_sampler.torch_datasets.sample.uk_regional import UKRegionalSample
@@ -22,8 +22,8 @@ class UKRegionalStreamedDataModule(BaseStreamedDataModule):
     """Datamodule which streams samples using sampler for ocf-data-sampler."""
 
     def _get_streamed_samples_dataset(
-        self,
-        start_time: str | None,
-        end_time: str | None
+        self, start_time: str | None, end_time: str | None
     ) -> Dataset:
-        return PVNetUKRegionalDataset(self.configuration, start_time=start_time, end_time=end_time)
+        return PVNetUKRegionalDataset(
+            self.configuration, start_time=start_time, end_time=end_time
+        )

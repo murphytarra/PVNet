@@ -5,8 +5,11 @@ import torch
 import numpy as np
 import pandas as pd
 import xarray as xr
-from pvnet.data import SitePresavedDataModule, SiteStreamedDataModule, UKRegionalPresavedDataModule
-
+from pvnet.data import (
+    SitePresavedDataModule,
+    SiteStreamedDataModule,
+    UKRegionalPresavedDataModule,
+)
 
 
 @pytest.fixture
@@ -23,7 +26,7 @@ def temp_pt_sample_dir():
                 "gsp": torch.rand(21),
                 "gsp_time_utc": torch.tensor(list(range(21))),
                 "gsp_nominal_capacity_mwp": torch.tensor(100.0),
-                "gsp_id": 12
+                "gsp_id": 12,
             }
             torch.save(sample, f"{tmpdirname}/train/{i:08d}.pt")
             torch.save(sample, f"{tmpdirname}/val/{i:08d}.pt")
@@ -57,7 +60,7 @@ def temp_nc_sample_dir():
                     "site__latitude": 52.5,
                     "site__longitude": -1.5,
                     "site__capacity_kwp": 10000.0,
-                }
+                },
             )
 
             ds.to_netcdf(f"{tmpdirname}/train/{i:08d}.nc", mode="w", engine="h5netcdf")
@@ -100,7 +103,7 @@ def test_iter_multiprocessing(temp_pt_sample_dir):
     )
 
     batches = [batch for _, batch in zip(range(2), dm.train_dataloader())]
-    assert len(batches)==2
+    assert len(batches) == 2
 
 
 def test_site_init_sample_dir(temp_nc_sample_dir):

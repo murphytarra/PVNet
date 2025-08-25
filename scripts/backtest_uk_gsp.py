@@ -41,7 +41,10 @@ from ocf_datapipes.batch import (
 from ocf_datapipes.config.load import load_yaml_configuration
 from ocf_datapipes.load import OpenGSP
 from ocf_datapipes.training.common import _get_datapipes_dict
-from ocf_datapipes.training.pvnet_all_gsp import construct_sliced_data_pipeline, create_t0_datapipe
+from ocf_datapipes.training.pvnet_all_gsp import (
+    construct_sliced_data_pipeline,
+    create_t0_datapipe,
+)
 from ocf_datapipes.utils.consts import ELEVATION_MEAN, ELEVATION_STD
 from omegaconf import DictConfig
 
@@ -143,17 +146,25 @@ def get_available_t0_times(start_datetime, end_datetime, config_path):
     # data which has the potential_init_times as timestamps. This is a bit hacky but works for now
 
     # Set up init-times we would like to make predictions for
-    potential_init_times = pd.date_range(start_datetime, end_datetime, freq=f"{FREQ_MINS}min")
+    potential_init_times = pd.date_range(
+        start_datetime, end_datetime, freq=f"{FREQ_MINS}min"
+    )
 
     # We buffer the potential init-times so that we don't lose any init-times from the
     # start and end. Again this is a hacky step
     history_duration = pd.Timedelta(config.input_data.gsp.history_minutes, "min")
     forecast_duration = pd.Timedelta(config.input_data.gsp.forecast_minutes, "min")
     buffered_potential_init_times = pd.date_range(
-        start_datetime - history_duration, end_datetime + forecast_duration, freq=f"{FREQ_MINS}min"
+        start_datetime - history_duration,
+        end_datetime + forecast_duration,
+        freq=f"{FREQ_MINS}min",
     )
 
-    ds_fake_gsp = buffered_potential_init_times.to_frame().to_xarray().rename({"index": "time_utc"})
+    ds_fake_gsp = (
+        buffered_potential_init_times.to_frame()
+        .to_xarray()
+        .rename({"index": "time_utc"})
+    )
     ds_fake_gsp = ds_fake_gsp.rename({0: "gsp_pv_power_mw"})
     ds_fake_gsp = ds_fake_gsp.expand_dims("gsp_id", axis=1)
     ds_fake_gsp = ds_fake_gsp.assign_coords(
@@ -251,14 +262,19 @@ class ModelPipe:
 
         # Get valid times for this forecast
         valid_times = pd.to_datetime(
-            [t0 + np.timedelta64((i + 1) * FREQ_MINS, "m") for i in range(n_valid_times)]
+            [
+                t0 + np.timedelta64((i + 1) * FREQ_MINS, "m")
+                for i in range(n_valid_times)
+            ]
         )
 
         # Get effective capacities for this forecast
         gsp_capacities = ds_gsp.effective_capacity_mwp.sel(
             time_utc=t0, gsp_id=slice(1, None)
         ).values
-        national_capacity = ds_gsp.effective_capacity_mwp.sel(time_utc=t0, gsp_id=0).item()
+        national_capacity = ds_gsp.effective_capacity_mwp.sel(
+            time_utc=t0, gsp_id=0
+        ).item()
 
         # Get the solar elevations. We need to un-normalise these from the values in the batch
         elevation = batch[BatchKey.gsp_solar_elevation] * ELEVATION_STD + ELEVATION_MEAN
@@ -280,7 +296,9 @@ class ModelPipe:
             device_batch = copy_batch_to_device(batch_to_tensor(batch), device)
             y_normed_gsp = model(device_batch).detach().cpu().numpy()
 
-        da_normed_gsp = preds_to_dataarray(y_normed_gsp, model, valid_times, ALL_GSP_IDS)
+        da_normed_gsp = preds_to_dataarray(
+            y_normed_gsp, model, valid_times, ALL_GSP_IDS
+        )
 
         # Multiply normalised forecasts by capacities and clip negatives
         da_abs_gsp = da_normed_gsp.clip(0, None) * gsp_capacities[:, None, None]
@@ -316,7 +334,9 @@ class ModelPipe:
             da_abs_national = da_normed_national.clip(0, None) * national_capacity
 
             # Apply sundown mask - All GSPs must be masked to mask national
-            da_abs_national = da_abs_national.where(~da_sundown_mask.all(dim="gsp_id")).fillna(0.0)
+            da_abs_national = da_abs_national.where(
+                ~da_sundown_mask.all(dim="gsp_id")
+            ).fillna(0.0)
 
         # If no summation model, make national predictions using simple sum
         else:
@@ -402,7 +422,9 @@ def main(config: DictConfig):
     if summation_chckpoint_dir is None:
         summation_model = None
     else:
-        summation_model, *_ = get_model_from_checkpoints([summation_chckpoint_dir], val_best=True)
+        summation_model, *_ = get_model_from_checkpoints(
+            [summation_chckpoint_dir], val_best=True
+        )
         summation_model = summation_model.eval().to(device)
 
     # Create object to make predictions for each input batch

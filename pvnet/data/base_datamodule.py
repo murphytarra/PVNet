@@ -1,4 +1,4 @@
-""" Data module for pytorch lightning """
+"""Data module for pytorch lightning"""
 
 from glob import glob
 
@@ -55,10 +55,10 @@ class BasePresavedDataModule(LightningDataModule):
             batch_size: Batch size.
             num_workers: Number of workers to use in multiprocess batch loading.
             prefetch_factor: Number of batches loaded in advance by each worker.
-            persistent_workers: If True, the data loader will not shut down the worker processes 
-                after a dataset has been consumed once. This allows to maintain the workers Dataset 
+            persistent_workers: If True, the data loader will not shut down the worker processes
+                after a dataset has been consumed once. This allows to maintain the workers Dataset
                 instances alive.
-            pin_memory: If True, the data loader will copy Tensors into device/CUDA pinned memory 
+            pin_memory: If True, the data loader will copy Tensors into device/CUDA pinned memory
                 before returning them.
         """
         super().__init__()
@@ -107,7 +107,6 @@ class BaseStreamedDataModule(LightningDataModule):
         train_period: list[str | None] = [None, None],
         val_period: list[str | None] = [None, None],
         seed: int | None = None,
-
     ):
         """Base Datamodule for streaming samples.
 
@@ -116,10 +115,10 @@ class BaseStreamedDataModule(LightningDataModule):
             batch_size: Batch size.
             num_workers: Number of workers to use in multiprocess batch loading.
             prefetch_factor: Number of batches loaded in advance by each worker.
-            persistent_workers: If True, the data loader will not shut down the worker processes 
-                after a dataset has been consumed once. This allows to maintain the workers Dataset 
+            persistent_workers: If True, the data loader will not shut down the worker processes
+                after a dataset has been consumed once. This allows to maintain the workers Dataset
                 instances alive.
-            pin_memory: If True, the data loader will copy Tensors into device/CUDA pinned memory 
+            pin_memory: If True, the data loader will copy Tensors into device/CUDA pinned memory
                 before returning them.
             train_period: Date range filter for train dataloader.
             val_period: Date range filter for val dataloader.
@@ -155,7 +154,7 @@ class BaseStreamedDataModule(LightningDataModule):
             # Prepare the train dataset
             self.train_dataset = self._get_streamed_samples_dataset(*self.train_period)
 
-            # Prepare and pre-shuffle the val dataset and set seed for reproducibility
+            # Prepare and pre-shuffle the val dataset and set seed for reproducibility
             val_dataset = self._get_streamed_samples_dataset(*self.val_period)
 
             if self.seed is not None:
@@ -165,16 +164,18 @@ class BaseStreamedDataModule(LightningDataModule):
             self.val_dataset = Subset(val_dataset, shuffled_indices)
 
     def _get_streamed_samples_dataset(
-        self,
-        start_time: str | None,
-        end_time: str | None
+        self, start_time: str | None, end_time: str | None
     ) -> Dataset:
         raise NotImplementedError
 
     def train_dataloader(self) -> DataLoader:
         """Construct train dataloader"""
-        return DataLoader(self.train_dataset, shuffle=True, **self._common_dataloader_kwargs)
+        return DataLoader(
+            self.train_dataset, shuffle=True, **self._common_dataloader_kwargs
+        )
 
     def val_dataloader(self) -> DataLoader:
         """Construct val dataloader"""
-        return DataLoader(self.val_dataset, shuffle=False, **self._common_dataloader_kwargs)
+        return DataLoader(
+            self.val_dataset, shuffle=False, **self._common_dataloader_kwargs
+        )

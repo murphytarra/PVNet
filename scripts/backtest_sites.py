@@ -18,6 +18,7 @@ python scripts/backtest_sites.py
 ```
 
 """
+
 try:
     import torch.multiprocessing as mp
 
@@ -39,7 +40,10 @@ from ocf_data_sampler.config import load_yaml_configuration
 from ocf_data_sampler.load.load_dataset import get_dataset_dict
 from ocf_data_sampler.numpy_sample.common_types import NumpyBatch
 from ocf_data_sampler.torch_datasets.datasets.site import SitesDatasetConcurrent
-from ocf_data_sampler.torch_datasets.sample.base import batch_to_tensor, copy_batch_to_device
+from ocf_data_sampler.torch_datasets.sample.base import (
+    batch_to_tensor,
+    copy_batch_to_device,
+)
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -90,9 +94,8 @@ MIN_DAY_ELEVATION = 0
 # ------------------------------------------------------------------
 # FUNCTIONS
 
-def load_model_from_hf(model_id: str,
-                       revision: str,
-                       token: str) -> Model:
+
+def load_model_from_hf(model_id: str, revision: str, token: str) -> Model:
     """Loads model and data config from HuggingFace
 
     Adapts and saves data config to be used by datasampler.
@@ -122,7 +125,9 @@ def preds_to_dataarray(preds, model, valid_times, site_ids):
     """Put numpy array of predictions into a dataarray"""
 
     if model.use_quantile_regression:
-        output_labels = [f"forecast_mw_plevel_{int(q*100):02}" for q in model.output_quantiles]
+        output_labels = [
+            f"forecast_mw_plevel_{int(q*100):02}" for q in model.output_quantiles
+        ]
         output_labels[output_labels.index("forecast_mw_plevel_50")] = "forecast_mw"
     else:
         output_labels = ["forecast_mw"]
@@ -131,12 +136,13 @@ def preds_to_dataarray(preds, model, valid_times, site_ids):
         data=preds,
         dims=["site_id", "target_datetime_utc", "output_label"],
         coords=dict(
-            site_id = site_ids,
+            site_id=site_ids,
             target_datetime_utc=valid_times,
             output_label=output_labels,
         ),
     )
     return da
+
 
 def get_sites_ds(config_path: str) -> xr.Dataset:
     """Load site data from the path in the data config.
@@ -155,7 +161,9 @@ def get_sites_ds(config_path: str) -> xr.Dataset:
 class ModelPipe:
     """A class to conveniently make and process predictions from batches"""
 
-    def __init__(self, model, ds_site: xr.Dataset, interval_start, interval_end, time_resolution):
+    def __init__(
+        self, model, ds_site: xr.Dataset, interval_start, interval_end, time_resolution
+    ):
         """A class to conveniently make and process predictions from batches
 
         Args:
@@ -197,16 +205,17 @@ class ModelPipe:
         # Get capacity for this site
         site_capacities = [float(i) for i in self.ds_site["capacity_kwp"].values]
         # Get solar elevation and create sundown mask
-        elevation = (tensor_batch['solar_elevation'] - 0.5) * 180
+        elevation = (tensor_batch["solar_elevation"] - 0.5) * 180
         # We only need elevation mask for forecasted values, not history
-        elevation = elevation[:, -valid_times.shape[0]:]
+        elevation = elevation[:, -valid_times.shape[0] :]
         site_ids = self.ds_site["site_id"].values
 
         da_sundown_mask = xr.DataArray(
             data=elevation < MIN_DAY_ELEVATION,
             dims=["site_id", "target_datetime_utc"],
-            coords=dict(site_id=site_ids,
-                        target_datetime_utc=valid_times,
+            coords=dict(
+                site_id=site_ids,
+                target_datetime_utc=valid_times,
             ),
         )
         with torch.no_grad():
@@ -219,9 +228,7 @@ class ModelPipe:
         # Multiply normalised forecasts by capacity and clip negatives
         # Define multipliers for each id
         capacity_multipliers = xr.DataArray(
-            data=site_capacities,
-            dims=["site_id"],
-            coords={"site_id": site_ids}
+            data=site_capacities, dims=["site_id"], coords={"site_id": site_ids}
         )
         da_abs = da_normed.clip(0, None) * capacity_multipliers
 
@@ -257,14 +264,18 @@ def main(config: DictConfig):
     interval_start = np.timedelta64(
         unpacked_configuration.input_data.site.interval_start_minutes, "m"
     )
-    interval_end = np.timedelta64(unpacked_configuration.input_data.site.interval_end_minutes, "m")
+    interval_end = np.timedelta64(
+        unpacked_configuration.input_data.site.interval_end_minutes, "m"
+    )
     time_resolution = np.timedelta64(
         unpacked_configuration.input_data.site.time_resolution_minutes, "m"
     )
 
     # Create dataset
     dataset = SitesDatasetConcurrent(
-        config.datamodule.configuration, start_time=start_datetime, end_time=end_datetime
+        config.datamodule.configuration,
+        start_time=start_datetime,
+        end_time=end_datetime,
     )
 
     # Load the site data
@@ -284,7 +295,9 @@ def main(config: DictConfig):
         raise ValueError("Provide a model checkpoint or a HuggingFace model")
 
     # Create object to make predictions
-    model_pipe = ModelPipe(model, ds_sites, interval_start, interval_end, time_resolution)
+    model_pipe = ModelPipe(
+        model, ds_sites, interval_start, interval_end, time_resolution
+    )
 
     # Loop through the batches
     pbar = tqdm(total=len(dataset))

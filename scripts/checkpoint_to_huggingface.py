@@ -30,7 +30,9 @@ app = typer.Typer(pretty_exceptions_show_locals=False)
 
 @app.command()
 def push_to_huggingface(
-    checkpoint_dir_paths: list[str] = typer.Argument(...,),
+    checkpoint_dir_paths: list[str] = typer.Argument(
+        ...,
+    ),
     huggingface_repo: str = typer.Option(..., "--huggingface-repo"),
     wandb_repo: str = typer.Option(..., "--wandb-repo"),
     card_template_path: str = typer.Option(..., "--card-template-path"),
@@ -66,19 +68,23 @@ def push_to_huggingface(
             if dirname in all_wandb_ids:
                 wandb_ids.append(dirname)
             else:
-                raise Exception(f"Could not find wand run for {path} within {wandb_repo}")
-    
+                raise Exception(
+                    f"Could not find wand run for {path} within {wandb_repo}"
+                )
+
     # Else if they are provided check that they exist
     else:
         for wandb_id in wandb_ids:
             if wandb_id not in all_wandb_ids:
-                raise Exception(f"Could not find wand run for {path} within {wandb_repo}")
+                raise Exception(
+                    f"Could not find wand run for {path} within {wandb_repo}"
+                )
 
     (
-        model, 
-        model_config, 
-        data_config_path, 
-        datamodule_config_path, 
+        model,
+        model_config,
+        data_config_path,
+        datamodule_config_path,
         experiment_config_path,
     ) = get_model_from_checkpoints(checkpoint_dir_paths, val_best)
 
