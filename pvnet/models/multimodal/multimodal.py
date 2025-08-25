@@ -153,7 +153,6 @@ class Model(BaseModel):
         self.interval_minutes = interval_minutes
         self.min_sat_delay_minutes = min_sat_delay_minutes
         self.adapt_batches = adapt_batches
-        print(self.location_id_mapping)
         if self.location_id_mapping is None:
             logger.warning(
                 "location_id_mapping` is not provided, "
